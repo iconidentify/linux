@@ -105,6 +105,15 @@ config SERIAL_APPLE_DOCKCHANNEL_EARLYCON
 	help
 	  Support for early console on the Apple DockChannel UART
 
+config SERIAL_APPLE_DOCKCHANNEL
+	bool "Apple DockChannel UART"
+	depends on ARCH_APPLE || COMPILE_TEST
+	select SERIAL_CORE_CONSOLE
+	select SERIAL_EARLYCON
+	default ARCH_APPLE
+	help
+	  Support for the Apple DockChannel UART
+
 config SERIAL_SB1250_DUART
 	tristate "BCM1xxx on-chip DUART serial support"
 	depends on SIBYTE_SB1xxx_SOC=y
