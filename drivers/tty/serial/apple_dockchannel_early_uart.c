@@ -10,11 +10,17 @@
 
 #define DOCKCHANNEL_TX8      0x04
 #define DOCKCHANNEL_TX_FREE  0x14
+#define DOCKCHANNEL_TX_RETRIES 10000
 
 static void dockchannel_uart_putc(struct uart_port *port, unsigned char c)
 {
-	while (readl(port->membase + DOCKCHANNEL_TX_FREE) == 0)
+	unsigned int retries = DOCKCHANNEL_TX_RETRIES;
+
+	while (readl(port->membase + DOCKCHANNEL_TX_FREE) == 0 && --retries)
 		cpu_relax();
+	if (!retries)
+		return;
+
 	writel(c, port->membase + DOCKCHANNEL_TX8);
 }
 
@@ -31,8 +37,7 @@ static int __init dockchannel_uart_early_setup(struct earlycon_device *device,
 {
 	struct uart_port *port = &device->port;
 
-	unsigned long mapbase = port->mapbase;
-	if (!mapbase)
+	if (!port->mapbase)
 		return -ENODEV;
 
 	device->con->write = dockchannel_uart_early_write;
