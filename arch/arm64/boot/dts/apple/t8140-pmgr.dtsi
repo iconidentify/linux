@@ -218,6 +218,7 @@
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
 		label = "ans";
+		apple,always-on;
 	};
 
 	ps_disp_sys: power-controller@280 {
