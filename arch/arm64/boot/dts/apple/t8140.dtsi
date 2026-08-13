@@ -157,6 +157,17 @@
 			power-domains = <&ps_aic>;
 		};
 
+		serial0: dockchannel-uart@308128000 {
+			compatible = "apple,dockchannel-uart";
+			reg = <0x3 0x0812c000 0x0 0x4000>,
+			      <0x3 0x08128000 0x0 0x4000>,
+			      <0x3 0x0810c000 0x0 0x4000>;
+			reg-names = "data", "config", "irq";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 470 IRQ_TYPE_LEVEL_HIGH>;
+			status = "disabled";
+		};
+
 		pmgr_mini: power-management@308280000 {
 			compatible = "apple,t8140-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
 			#address-cells = <1>;
