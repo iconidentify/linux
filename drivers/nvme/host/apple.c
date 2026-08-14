@@ -908,8 +908,20 @@ static void apple_nvme_disable(struct apple_nvme *anv, bool shutdown)
 
 	if (!dead) {
 		if (READ_ONCE(anv->ioq.enabled)) {
-			apple_nvme_remove_sq(anv);
-			apple_nvme_remove_cq(anv);
+			/*
+			 * Post-M4 firmware rejects Delete SQ and Delete CQ with
+			 * BAD_CMD during shutdown. The queues are registered through
+			 * the dedicated IOSQ/IOCQ aperture on these controllers and
+			 * are torn down by the following controller shutdown/disable.
+			 * Keep the explicit admin commands for legacy controllers.
+			 */
+			if (anv->hw->needs_ioq_registers) {
+				dev_info(anv->dev,
+					 "post-M4 shutdown: skipping unsupported I/O queue delete commands\n");
+			} else {
+				apple_nvme_remove_sq(anv);
+				apple_nvme_remove_cq(anv);
+			}
 		}
 
 		/*
