@@ -938,8 +938,14 @@ static void apple_nvme_disable(struct apple_nvme *anv, bool shutdown)
 		 * NVMe controller is handed off with firmware shut down, in an
 		 * NVMe disabled state, after a clean shutdown).
 		 */
-		if (shutdown)
-			nvme_disable_ctrl(&anv->ctrl, shutdown);
+		if (shutdown) {
+			if (anv->hw->needs_ioq_registers) {
+				dev_info(anv->dev,
+					 "post-M4 shutdown: skipping unsupported shutdown notification\n");
+			} else {
+				nvme_disable_ctrl(&anv->ctrl, shutdown);
+			}
+		}
 		nvme_disable_ctrl(&anv->ctrl, false);
 	}
 
