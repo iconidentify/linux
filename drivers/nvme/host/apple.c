@@ -946,7 +946,12 @@ static void apple_nvme_disable(struct apple_nvme *anv, bool shutdown)
 				nvme_disable_ctrl(&anv->ctrl, shutdown);
 			}
 		}
-		nvme_disable_ctrl(&anv->ctrl, false);
+		if (shutdown && anv->hw->needs_ioq_registers) {
+			dev_info(anv->dev,
+				 "post-M4 shutdown: leaving controller enabled for RTKit shutdown\n");
+		} else {
+			nvme_disable_ctrl(&anv->ctrl, false);
+		}
 	}
 
 	WRITE_ONCE(anv->ioq.enabled, false);
