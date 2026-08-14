@@ -1788,6 +1788,19 @@ static void apple_nvme_shutdown(struct platform_device *pdev)
 
 	flush_delayed_work(&anv->flush_dwork);
 	apple_nvme_disable(anv, true);
+	/*
+	 * Post-M4 ANS firmware crashes when asked to perform the RTKit shutdown
+	 * handshake during final system shutdown, even after all Linux queues are
+	 * quiesced and the controller is left enabled. Leave the co-processor
+	 * running until the imminent platform reset. Removal and suspend retain the
+	 * complete teardown sequence below.
+	 */
+	if (anv->hw->needs_ioq_registers) {
+		dev_info(anv->dev,
+			 "post-M4 shutdown: leaving RTKit running for system reset\n");
+		return;
+	}
+
 	if (apple_rtkit_is_running(anv->rtk)) {
 		apple_rtkit_shutdown(anv->rtk);
 
