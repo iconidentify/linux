@@ -1068,7 +1068,7 @@ static void apple_nvme_reset_work(struct work_struct *work)
 {
 	unsigned int nr_io_queues = 1;
 	int ret;
-	u32 boot_status, aqa;
+	u32 boot_status, aqa, ioqa, ioqa_depth;
 	struct apple_nvme *anv =
 		container_of(work, struct apple_nvme, ctrl.reset_work);
 	enum nvme_ctrl_state state = nvme_ctrl_state(&anv->ctrl);
@@ -1162,10 +1162,28 @@ static void apple_nvme_reset_work(struct work_struct *work)
 			writel(APPLE_ANS_LINEAR_SQ_EN,
 				anv->mmio_nvme + APPLE_ANS_LINEAR_SQ_CTRL);
 
-		/* Allow as many pending command as possible for both queues */
-		writel(anv->hw->max_queue_depth
-			| (anv->hw->max_queue_depth << 16), anv->mmio_nvme
-			+ APPLE_ANS_MAX_PEND_CMDS_CTRL);
+		/*
+		 * The legacy register takes queue entry counts. On post-M4
+		 * controllers the same offset is IOQA and both fields contain the
+		 * zero-based queue size, like NVMe AQA. Programming 64 for a
+		 * 64-entry queue makes ANS treat it as 65 entries and reject CQ head
+		 * 63 once the host wraps through the queue.
+		 */
+		ioqa_depth = anv->hw->max_queue_depth;
+		if (anv->hw->needs_ioq_registers)
+			ioqa_depth--;
+		ioqa = ioqa_depth | (ioqa_depth << 16);
+		writel(ioqa, anv->mmio_nvme + APPLE_ANS_MAX_PEND_CMDS_CTRL);
+		if (readl(anv->mmio_nvme + APPLE_ANS_MAX_PEND_CMDS_CTRL) !=
+		    ioqa) {
+			dev_err(anv->dev, "failed to program I/O queue aperture\n");
+			ret = -EIO;
+			goto out;
+		}
+		if (anv->hw->needs_ioq_registers)
+			dev_info(anv->dev,
+				 "post-M4 I/O queues: entries=%u IOQA=0x%08x\n",
+				 anv->hw->max_queue_depth, ioqa);
 
 		/* Setup the NVMMU for the maximum admin and IO queue depth */
 		writel(anv->hw->max_queue_depth - 1,
