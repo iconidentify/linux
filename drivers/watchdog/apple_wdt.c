@@ -159,6 +159,7 @@ static int apple_wdt_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct apple_wdt *wdt;
 	struct clk *clk;
+	int ret;
 	u32 wdt_ctrl;
 
 	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
@@ -167,14 +168,17 @@ static int apple_wdt_probe(struct platform_device *pdev)
 
 	wdt->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(wdt->regs))
-		return PTR_ERR(wdt->regs);
+		return dev_err_probe(dev, PTR_ERR(wdt->regs),
+				     "failed to map watchdog registers\n");
 
 	clk = devm_clk_get_enabled(dev, NULL);
 	if (IS_ERR(clk))
-		return PTR_ERR(clk);
+		return dev_err_probe(dev, PTR_ERR(clk),
+				     "failed to enable reference clock\n");
 	wdt->clk_rate = clk_get_rate(clk);
 	if (!wdt->clk_rate)
-		return -EINVAL;
+		return dev_err_probe(dev, -EINVAL,
+				     "reference clock rate is zero\n");
 
 	platform_set_drvdata(pdev, wdt);
 
@@ -192,7 +196,14 @@ static int apple_wdt_probe(struct platform_device *pdev)
 	watchdog_stop_on_unregister(&wdt->wdd);
 	watchdog_set_restart_priority(&wdt->wdd, 128);
 
-	return devm_watchdog_register_device(dev, &wdt->wdd);
+	ret = devm_watchdog_register_device(dev, &wdt->wdd);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to register watchdog device\n");
+
+	dev_info(dev, "registered at %lu Hz\n", wdt->clk_rate);
+
+	return 0;
 }
 
 static int apple_wdt_resume(struct device *dev)
