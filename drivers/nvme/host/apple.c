@@ -18,6 +18,7 @@
 #include <linux/interrupt.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/io.h>
+#include <linux/ioport.h>
 #include <linux/iopoll.h>
 #include <linux/jiffies.h>
 #include <linux/mempool.h>
@@ -194,6 +195,7 @@ struct apple_nvme {
 	struct apple_sart *sart;
 	struct apple_rtkit *rtk;
 	struct reset_control *reset;
+	bool owns_rtkit;
 
 	struct dma_pool *prp_page_pool;
 	struct dma_pool *prp_small_pool;
@@ -219,6 +221,21 @@ struct apple_nvme {
 	unsigned long last_flush;
 	struct delayed_work flush_dwork;
 };
+
+static inline void apple_nvme_writeq(struct apple_nvme *anv, u64 value,
+				     void __iomem *addr)
+{
+	/*
+	 * Post-M4 ANS consumes the admin and NVMMU queue addresses as paired
+	 * 32-bit registers while the controller is disabled. Match the access
+	 * sequence used by Apple firmware, m1n1, and U-Boot; older ANS
+	 * generations retain their native 64-bit access.
+	 */
+	if (anv->hw->needs_ioq_registers)
+		lo_hi_writeq(value, addr);
+	else
+		writeq(value, addr);
+}
 
 unsigned int flush_interval = 1000;
 module_param(flush_interval, uint, 0644);
@@ -264,10 +281,28 @@ static int apple_nvme_sart_dma_setup(void *cookie,
 	struct apple_nvme *anv = cookie;
 	int ret;
 
-	if (bfr->iova)
-		return -EINVAL;
 	if (!bfr->size)
 		return -EINVAL;
+	if (bfr->iova) {
+		/*
+		 * A live post-M4 handoff retains the RTKit buffers allocated by
+		 * Stage 1.  Their identity IOVAs remain SART-authorized and the
+		 * firmware requests that the new owner map, rather than replace,
+		 * them.  Never accept this path for an ordinary Linux-owned session.
+		 */
+		if (!anv->owns_rtkit ||
+		    region_intersects(bfr->iova, bfr->size,
+				      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) !=
+			    REGION_INTERSECTS)
+			return -EINVAL;
+
+		bfr->buffer = memremap(bfr->iova, bfr->size, MEMREMAP_WB);
+		if (!bfr->buffer)
+			return -ENOMEM;
+		bfr->is_mapped = true;
+		bfr->private = anv;
+		return 0;
+	}
 
 	bfr->buffer =
 		dma_alloc_coherent(anv->dev, bfr->size, &bfr->iova, GFP_KERNEL);
@@ -288,6 +323,11 @@ static void apple_nvme_sart_dma_destroy(void *cookie,
 					struct apple_rtkit_shmem *bfr)
 {
 	struct apple_nvme *anv = cookie;
+
+	if (bfr->private == anv) {
+		memunmap(bfr->buffer);
+		return;
+	}
 
 	apple_sart_remove_allowed_region(anv->sart, bfr->iova, bfr->size);
 	dma_free_coherent(anv->dev, bfr->size, bfr->buffer, bfr->iova);
@@ -337,13 +377,16 @@ static void apple_nvme_submit_cmd_t8103(struct apple_nvme_queue *q,
 	u32 tag = nvme_tag_from_cid(cmd->common.command_id);
 	struct apple_nvmmu_tcb *tcb = &q->tcbs[tag];
 
-	tcb->opcode = cmd->common.opcode;
+	/* The NVMMU TCB opcode is reserved and macOS always leaves it clear. */
+	tcb->opcode = 0;
 	tcb->prp1 = cmd->common.dptr.prp1;
 	tcb->prp2 = cmd->common.dptr.prp2;
 	tcb->length = cmd->rw.length;
 	tcb->command_id = tag;
 
-	if (nvme_is_write(cmd))
+	if (!cmd->common.dptr.prp1)
+		tcb->dma_flags = 0;
+	else if (nvme_is_write(cmd))
 		tcb->dma_flags = APPLE_ANS_TCB_DMA_TO_DEVICE;
 	else
 		tcb->dma_flags = APPLE_ANS_TCB_DMA_FROM_DEVICE;
@@ -1110,6 +1153,39 @@ static void apple_nvme_reset_work(struct work_struct *work)
 		goto out;
 	}
 
+	/*
+	 * Post-M4 firmware can be handed over live, but cannot renegotiate HELLO
+	 * and EPMAP across boot stages. Adopt the first healthy inherited session;
+	 * subsequent resets use the normal RTKit shutdown/reset path below.
+	 */
+	if (!anv->owns_rtkit && anv->hw->needs_ioq_registers &&
+	    (readl(anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL) &
+	     APPLE_ANS_COPROC_CPU_CONTROL_RUN) &&
+	    readl(anv->mmio_nvme + APPLE_ANS_BOOT_STATUS) ==
+	     APPLE_ANS_BOOT_STATUS_OK) {
+		ret = apple_rtkit_adopt_running(anv->rtk);
+		if (ret)
+			goto out;
+		dev_info(anv->dev, "adopted inherited post-M4 RTKit session\n");
+
+		/*
+		 * U-Boot keeps the controller enabled until the mailbox session has
+		 * an owner.  Disable it only after adoption, then replace every queue
+		 * pointer below while CC.EN is clear.
+		 */
+		anv->ctrl.cap = readq(anv->mmio_nvme + NVME_REG_CAP);
+		anv->ctrl.ctrl_config =
+			readl(anv->mmio_nvme + NVME_REG_CC);
+		if (anv->ctrl.ctrl_config & NVME_CC_ENABLE) {
+			ret = nvme_disable_ctrl(&anv->ctrl, false);
+			if (ret)
+				goto out;
+			dev_info(anv->dev,
+				 "disabled inherited post-M4 controller after RTKit adoption\n");
+		}
+		goto rtkit_ready;
+	}
+
 	/* RTKit must be shut down cleanly for the (soft)-reset to work */
 	if (apple_rtkit_is_running(anv->rtk)) {
 		/* reset the controller if it is enabled */
@@ -1155,6 +1231,10 @@ static void apple_nvme_reset_work(struct work_struct *work)
 		goto out;
 	}
 
+rtkit_ready:
+	anv->owns_rtkit = true;
+	dev_dbg(anv->dev, "RTKit ownership established\n");
+
 	ret = readl_poll_timeout(anv->mmio_nvme + APPLE_ANS_BOOT_STATUS,
 				 boot_status,
 				 boot_status == APPLE_ANS_BOOT_STATUS_OK,
@@ -1163,6 +1243,7 @@ static void apple_nvme_reset_work(struct work_struct *work)
 		dev_err(anv->dev, "ANS did not initialize");
 		goto out;
 	}
+	dev_dbg(anv->dev, "firmware ready\n");
 
 	dev_dbg(anv->dev, "ANS booted successfully.");
 
@@ -1229,15 +1310,18 @@ static void apple_nvme_reset_work(struct work_struct *work)
 	aqa = APPLE_NVME_AQ_DEPTH - 1;
 	aqa |= aqa << 16;
 	writel(aqa, anv->mmio_nvme + NVME_REG_AQA);
-	writeq(anv->adminq.sq_dma_addr, anv->mmio_nvme + NVME_REG_ASQ);
-	writeq(anv->adminq.cq_dma_addr, anv->mmio_nvme + NVME_REG_ACQ);
+	apple_nvme_writeq(anv, anv->adminq.sq_dma_addr,
+			  anv->mmio_nvme + NVME_REG_ASQ);
+	apple_nvme_writeq(anv, anv->adminq.cq_dma_addr,
+			  anv->mmio_nvme + NVME_REG_ACQ);
+	dev_dbg(anv->dev, "admin queue programmed\n");
 
 	if (anv->hw->has_lsq_nvmmu) {
 		/* Setup NVMMU for both queues */
-		writeq(anv->adminq.tcb_dma_addr,
-			anv->mmio_nvmmu + APPLE_NVMMU_ASQ_TCB_BASE);
-		writeq(anv->ioq.tcb_dma_addr,
-			anv->mmio_nvmmu + APPLE_NVMMU_IOSQ_TCB_BASE);
+		apple_nvme_writeq(anv, anv->adminq.tcb_dma_addr,
+				  anv->mmio_nvmmu + APPLE_NVMMU_ASQ_TCB_BASE);
+		apple_nvme_writeq(anv, anv->ioq.tcb_dma_addr,
+				  anv->mmio_nvmmu + APPLE_NVMMU_IOSQ_TCB_BASE);
 	}
 
 	anv->ctrl.sqsize =
@@ -1248,6 +1332,7 @@ static void apple_nvme_reset_work(struct work_struct *work)
 	ret = nvme_enable_ctrl(&anv->ctrl);
 	if (ret)
 		goto out;
+	dev_dbg(anv->dev, "controller enabled\n");
 
 	dev_dbg(anv->dev, "Starting admin queue");
 	apple_nvme_init_queue(&anv->adminq);
@@ -1263,22 +1348,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
 	ret = nvme_init_ctrl_finish(&anv->ctrl, false);
 	if (ret)
 		goto out;
+	dev_dbg(anv->dev, "identify completed\n");
 
 	dev_dbg(anv->dev, "Creating IOCQ");
 	ret = apple_nvme_create_cq(anv);
 	if (ret)
 		goto out;
+	dev_dbg(anv->dev, "I/O CQ created\n");
 	dev_dbg(anv->dev, "Creating IOSQ");
 	ret = apple_nvme_create_sq(anv);
 	if (ret)
 		goto out_remove_cq;
+	dev_dbg(anv->dev, "I/O SQ created\n");
 
 	apple_nvme_init_queue(&anv->ioq);
 	if (anv->hw->needs_ioq_registers) {
 		writeq(anv->ioq.cq_dma_addr,
-			anv->mmio_nvme + APPLE_ANS_IOCQ_REGISTER);
+		       anv->mmio_nvme + APPLE_ANS_IOCQ_REGISTER);
 		writeq(anv->ioq.sq_dma_addr,
-			anv->mmio_nvme + APPLE_ANS_IOSQ_REGISTER);
+		       anv->mmio_nvme + APPLE_ANS_IOSQ_REGISTER);
 	}
 	nr_io_queues = 1;
 	if (anv->hw->has_queue_count) {

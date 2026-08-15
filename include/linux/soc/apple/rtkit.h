@@ -118,6 +118,12 @@ int apple_rtkit_reinit(struct apple_rtkit *rtk);
 int apple_rtkit_boot(struct apple_rtkit *rtk);
 
 /*
+ * Adopt a co-processor session that a previous boot stage left fully running.
+ * The caller must verify the device-specific running and ready indicators.
+ */
+int apple_rtkit_adopt_running(struct apple_rtkit *rtk);
+
+/*
  * Quiesce the co-processor.
  */
 int apple_rtkit_quiesce(struct apple_rtkit *rtk);

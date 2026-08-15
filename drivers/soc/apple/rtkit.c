@@ -445,9 +445,9 @@ static void apple_rtkit_syslog_rx_log(struct apple_rtkit *rtk, u64 msg)
 	int msglen;
 
 	if (!rtk->syslog_msg_buffer) {
-		dev_warn(
-			rtk->dev,
-			"RTKit: received syslog message but no syslog_msg_buffer\n");
+		if (!rtk->adopted)
+			dev_warn(rtk->dev,
+				 "RTKit: received syslog message but no syslog_msg_buffer\n");
 		goto done;
 	}
 	if (!rtk->syslog_buffer.size) {
@@ -752,6 +752,7 @@ int apple_rtkit_reinit(struct apple_rtkit *rtk)
 	rtk->syslog_msg_buffer = NULL;
 	rtk->syslog_n_entries = 0;
 	rtk->syslog_msg_size = 0;
+	rtk->adopted = false;
 
 	bitmap_zero(rtk->endpoints, APPLE_RTKIT_MAX_ENDPOINTS);
 	set_bit(APPLE_RTKIT_EP_MGMT, rtk->endpoints);
@@ -838,6 +839,33 @@ int apple_rtkit_boot(struct apple_rtkit *rtk)
 	return apple_rtkit_set_ap_power_state(rtk, APPLE_RTKIT_PWR_STATE_ON);
 }
 EXPORT_SYMBOL_GPL(apple_rtkit_boot);
+
+int apple_rtkit_adopt_running(struct apple_rtkit *rtk)
+{
+	static const u8 system_endpoints[] = {
+		APPLE_RTKIT_EP_CRASHLOG,
+		APPLE_RTKIT_EP_SYSLOG,
+		APPLE_RTKIT_EP_DEBUG,
+		APPLE_RTKIT_EP_IOREPORT,
+		APPLE_RTKIT_EP_OSLOG,
+		APPLE_RTKIT_EP_TRACEKIT,
+	};
+	int i;
+
+	if (rtk->crashed)
+		return -EINVAL;
+
+	/* The previous owner already completed and acknowledged this EPMAP. */
+	for (i = 0; i < ARRAY_SIZE(system_endpoints); i++)
+		set_bit(system_endpoints[i], rtk->endpoints);
+
+	rtk->iop_power_state = APPLE_RTKIT_PWR_STATE_ON;
+	rtk->ap_power_state = APPLE_RTKIT_PWR_STATE_ON;
+	rtk->adopted = true;
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_rtkit_adopt_running);
 
 int apple_rtkit_shutdown(struct apple_rtkit *rtk)
 {
