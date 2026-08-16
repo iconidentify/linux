@@ -222,14 +222,14 @@ struct apple_nvme {
 	struct delayed_work flush_dwork;
 };
 
-static inline void apple_nvme_write_adminq_addr(struct apple_nvme *anv,
-						u64 value, void __iomem *addr)
+static inline void apple_nvme_writeq(struct apple_nvme *anv, u64 value,
+				     void __iomem *addr)
 {
 	/*
-	 * Post-M4 ANS consumes ASQ/ACQ as paired 32-bit registers while the
-	 * controller is disabled.  The NVMMU TCB-base registers are different:
-	 * they require the native 64-bit write used below.  Using this helper for
-	 * the TCB bases lets the controller start but corrupts subsequent I/O.
+	 * Post-M4 ANS consumes the admin and NVMMU queue addresses as paired
+	 * 32-bit registers while the controller is disabled. Match the access
+	 * sequence used by Apple firmware, m1n1, and U-Boot; older ANS
+	 * generations retain their native 64-bit access.
 	 */
 	if (anv->hw->needs_ioq_registers)
 		lo_hi_writeq(value, addr);
@@ -1310,18 +1310,18 @@ rtkit_ready:
 	aqa = APPLE_NVME_AQ_DEPTH - 1;
 	aqa |= aqa << 16;
 	writel(aqa, anv->mmio_nvme + NVME_REG_AQA);
-	apple_nvme_write_adminq_addr(anv, anv->adminq.sq_dma_addr,
-				     anv->mmio_nvme + NVME_REG_ASQ);
-	apple_nvme_write_adminq_addr(anv, anv->adminq.cq_dma_addr,
-				     anv->mmio_nvme + NVME_REG_ACQ);
+	apple_nvme_writeq(anv, anv->adminq.sq_dma_addr,
+			  anv->mmio_nvme + NVME_REG_ASQ);
+	apple_nvme_writeq(anv, anv->adminq.cq_dma_addr,
+			  anv->mmio_nvme + NVME_REG_ACQ);
 	dev_dbg(anv->dev, "admin queue programmed\n");
 
 	if (anv->hw->has_lsq_nvmmu) {
 		/* Setup NVMMU for both queues */
-		writeq(anv->adminq.tcb_dma_addr,
-		       anv->mmio_nvmmu + APPLE_NVMMU_ASQ_TCB_BASE);
-		writeq(anv->ioq.tcb_dma_addr,
-		       anv->mmio_nvmmu + APPLE_NVMMU_IOSQ_TCB_BASE);
+		apple_nvme_writeq(anv, anv->adminq.tcb_dma_addr,
+				  anv->mmio_nvmmu + APPLE_NVMMU_ASQ_TCB_BASE);
+		apple_nvme_writeq(anv, anv->ioq.tcb_dma_addr,
+				  anv->mmio_nvmmu + APPLE_NVMMU_IOSQ_TCB_BASE);
 	}
 
 	anv->ctrl.sqsize =
