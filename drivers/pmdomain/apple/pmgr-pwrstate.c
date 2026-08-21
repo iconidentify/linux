@@ -8,6 +8,7 @@
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 #include <linux/err.h>
+#include <linux/init.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
@@ -50,8 +51,180 @@ struct apple_pmgr_ps {
 	bool externally_clocked;
 };
 
+/*
+ * Diagnostics for newer Apple SoCs whose iBoot/firmware ownership contract is
+ * not yet understood.  These leave every provider and its initial state
+ * intact, but can suppress the otherwise unconditional probe-time AUTO_ENABLE
+ * write on domains that firmware already left active.  Runtime genpd
+ * transitions keep their existing behaviour.  Bits 0-3 select the four
+ * T8140 display domains implicated by measured delayed faults, bit 4 selects
+ * active Main PMGR domains outside the complete ANS/APCIe hierarchy, and bit
+ * 5 selects active Nub PMGR domains.  Bits 6-11 select each member of the
+ * T8140 ANS/APCIe hierarchy individually.  Bits 12-13 select the two observed
+ * Nub SMC I2C domains individually.  Bit assignments are local to this
+ * diagnostic and default to no behavioural change.
+ */
+static bool apple_pmgr_no_auto_enable_on_probe;
+static unsigned int apple_pmgr_preserve_auto_probe_mask;
+static bool apple_pmgr_trace_writes;
+static unsigned int apple_pmgr_suppress_write_mask;
+
+#define APPLE_PMGR_T8140_DISP_SYS       BIT(0)
+#define APPLE_PMGR_T8140_DISPEXT0_SYS   BIT(1)
+#define APPLE_PMGR_T8140_DISP_FE        BIT(2)
+#define APPLE_PMGR_T8140_DISPEXT0_FE    BIT(3)
+#define APPLE_PMGR_T8140_MAIN_NON_NVME  BIT(4)
+#define APPLE_PMGR_T8140_NUB_ALL        BIT(5)
+#define APPLE_PMGR_T8140_APCIE_GP       BIT(6)
+#define APPLE_PMGR_T8140_ANS            BIT(7)
+#define APPLE_PMGR_T8140_APCIE_SYS_GP   BIT(8)
+#define APPLE_PMGR_T8140_APCIE_ST       BIT(9)
+#define APPLE_PMGR_T8140_APCIE_SYS_ST   BIT(10)
+#define APPLE_PMGR_T8140_APCIE_PHY_SW   BIT(11)
+#define APPLE_PMGR_T8140_NUB_SMC_I2CM1  BIT(12)
+#define APPLE_PMGR_T8140_NUB_SMC_I2CM2  BIT(13)
+#define APPLE_PMGR_T8140_NVME_MASK      GENMASK(11, 6)
+#define APPLE_PMGR_T8140_DIAGNOSTIC_MASK GENMASK(13, 0)
+
+static int __init apple_pmgr_no_auto_probe_param(char *value)
+{
+	return kstrtobool(value, &apple_pmgr_no_auto_enable_on_probe);
+}
+early_param("apple_pmgr.no_auto_probe", apple_pmgr_no_auto_probe_param);
+
+static int __init apple_pmgr_preserve_auto_probe_mask_param(char *value)
+{
+	unsigned int mask;
+	int ret;
+
+	ret = kstrtouint(value, 0, &mask);
+	if (ret)
+		return ret;
+	if (mask & ~APPLE_PMGR_T8140_DIAGNOSTIC_MASK)
+		return -EINVAL;
+
+	apple_pmgr_preserve_auto_probe_mask = mask;
+	return 0;
+}
+early_param("apple_pmgr.preserve_auto_probe_mask",
+	    apple_pmgr_preserve_auto_probe_mask_param);
+
+static int __init apple_pmgr_trace_writes_param(char *value)
+{
+	return kstrtobool(value, &apple_pmgr_trace_writes);
+}
+early_param("apple_pmgr.trace_writes", apple_pmgr_trace_writes_param);
+
+static int __init apple_pmgr_suppress_write_mask_param(char *value)
+{
+	unsigned int mask;
+	int ret;
+
+	ret = kstrtouint(value, 0, &mask);
+	if (ret)
+		return ret;
+	if (mask & ~APPLE_PMGR_T8140_DIAGNOSTIC_MASK)
+		return -EINVAL;
+
+	apple_pmgr_suppress_write_mask = mask;
+	return 0;
+}
+early_param("apple_pmgr.suppress_write_mask",
+	    apple_pmgr_suppress_write_mask_param);
+
 #define genpd_to_apple_pmgr_ps(_genpd) container_of(_genpd, struct apple_pmgr_ps, genpd)
 #define rcdev_to_apple_pmgr_ps(_rcdev) container_of(_rcdev, struct apple_pmgr_ps, rcdev)
+
+static unsigned int apple_pmgr_t8140_diagnostic_bit(struct apple_pmgr_ps *ps)
+{
+	struct resource parent;
+
+	if (!of_device_is_compatible(ps->dev->of_node,
+				     "apple,t8140-pmgr-pwrstate"))
+		return 0;
+
+	switch (ps->offset) {
+	case 0x280:
+		return APPLE_PMGR_T8140_DISP_SYS;
+	case 0x288:
+		return APPLE_PMGR_T8140_DISPEXT0_SYS;
+	case 0x318:
+		return APPLE_PMGR_T8140_DISP_FE;
+	case 0x320:
+		return APPLE_PMGR_T8140_DISPEXT0_FE;
+	case 0x258:
+		return APPLE_PMGR_T8140_APCIE_GP;
+	case 0x278:
+		return APPLE_PMGR_T8140_ANS;
+	case 0x2a0:
+		return APPLE_PMGR_T8140_APCIE_SYS_GP;
+	case 0x310:
+		return APPLE_PMGR_T8140_APCIE_ST;
+	case 0x3a0:
+		return APPLE_PMGR_T8140_APCIE_SYS_ST;
+	case 0x3c0:
+		return APPLE_PMGR_T8140_APCIE_PHY_SW;
+	default:
+		break;
+	}
+
+	if (of_address_to_resource(ps->dev->of_node->parent, 0, &parent))
+		return 0;
+	if (parent.start == 0x308280000ULL && ps->offset == 0x8030)
+		return APPLE_PMGR_T8140_NUB_ALL |
+		       APPLE_PMGR_T8140_NUB_SMC_I2CM1;
+	if (parent.start == 0x308280000ULL && ps->offset == 0x8038)
+		return APPLE_PMGR_T8140_NUB_ALL |
+		       APPLE_PMGR_T8140_NUB_SMC_I2CM2;
+	if (parent.start == 0x308280000ULL)
+		return APPLE_PMGR_T8140_NUB_ALL;
+	if (parent.start == 0x300700000ULL)
+		return APPLE_PMGR_T8140_MAIN_NON_NVME;
+
+	return 0;
+}
+
+static int apple_pmgr_write(struct apple_pmgr_ps *ps, u32 value,
+			    const char *reason)
+{
+	unsigned int bit = apple_pmgr_t8140_diagnostic_bit(ps);
+
+	if (apple_pmgr_suppress_write_mask & bit) {
+		dev_info(ps->dev,
+			 "diagnostic: PMGR write suppressed reason=%s offset=0x%x value=0x%08x mask=0x%x\n",
+			 reason, ps->offset, value,
+			 apple_pmgr_suppress_write_mask);
+		return 0;
+	}
+
+	if (apple_pmgr_trace_writes)
+		dev_info(ps->dev,
+			 "diagnostic: PMGR write reason=%s offset=0x%x value=0x%08x\n",
+			 reason, ps->offset, value);
+
+	return regmap_write(ps->regmap, ps->offset, value);
+}
+
+static int apple_pmgr_update_bits(struct apple_pmgr_ps *ps, u32 mask,
+				  u32 value, const char *reason)
+{
+	unsigned int bit = apple_pmgr_t8140_diagnostic_bit(ps);
+
+	if (apple_pmgr_suppress_write_mask & bit) {
+		dev_info(ps->dev,
+			 "diagnostic: PMGR update suppressed reason=%s offset=0x%x mask=0x%08x value=0x%08x suppress_mask=0x%x\n",
+			 reason, ps->offset, mask, value,
+			 apple_pmgr_suppress_write_mask);
+		return 0;
+	}
+
+	if (apple_pmgr_trace_writes)
+		dev_info(ps->dev,
+			 "diagnostic: PMGR update reason=%s offset=0x%x mask=0x%08x value=0x%08x\n",
+			 reason, ps->offset, mask, value);
+
+	return regmap_update_bits(ps->regmap, ps->offset, mask, value);
+}
 
 static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool auto_enable)
 {
@@ -76,7 +249,7 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 		if (ps->force_reset)
 			reg_pre |= APPLE_PMGR_PS_RESET;
 
-		regmap_write(ps->regmap, ps->offset, reg_pre);
+		apple_pmgr_write(ps, reg_pre, "set-pre-disable-reset");
 
 		ret = regmap_read_poll_timeout_atomic(
 			ps->regmap, ps->offset, cur,
@@ -95,7 +268,7 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 
 	dev_dbg(ps->dev, "PS %s: pwrstate = 0x%x: 0x%x\n", genpd->name, pstate, reg);
 
-	regmap_write(ps->regmap, ps->offset, reg);
+	apple_pmgr_write(ps, reg, "set-target");
 
 	if (ps->externally_clocked && pstate == APPLE_PMGR_PS_ACTIVE) {
 		/*
@@ -120,7 +293,7 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 	if (auto_enable) {
 		/* Not all devices implement this; this is a no-op where not implemented. */
 		reg |= APPLE_PMGR_AUTO_ENABLE;
-		regmap_write(ps->regmap, ps->offset, reg);
+		apple_pmgr_write(ps, reg, "set-auto-enable");
 	}
 
 	return ret;
@@ -138,6 +311,52 @@ static bool apple_pmgr_ps_is_active(struct apple_pmgr_ps *ps)
 	return (FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg) == APPLE_PMGR_PS_ACTIVE ||
 		(FIELD_GET(APPLE_PMGR_PS_TARGET, reg) == APPLE_PMGR_PS_ACTIVE &&
 		 reg & APPLE_PMGR_AUTO_ENABLE));
+}
+
+static bool apple_pmgr_preserve_auto_on_probe(struct apple_pmgr_ps *ps)
+{
+	if (apple_pmgr_no_auto_enable_on_probe)
+		return true;
+
+	return apple_pmgr_preserve_auto_probe_mask &
+	       apple_pmgr_t8140_diagnostic_bit(ps);
+}
+
+static void apple_pmgr_log_t8140_nvme_probe_state(struct apple_pmgr_ps *ps)
+{
+	struct resource parent;
+	u32 reg;
+
+	if (!(apple_pmgr_preserve_auto_probe_mask &
+	      APPLE_PMGR_T8140_NVME_MASK) ||
+	    !of_device_is_compatible(ps->dev->of_node,
+				     "apple,t8140-pmgr-pwrstate") ||
+	    of_address_to_resource(ps->dev->of_node->parent, 0, &parent) ||
+	    parent.start != 0x300700000ULL)
+		return;
+
+	switch (ps->offset) {
+	case 0x258:
+	case 0x278:
+	case 0x2a0:
+	case 0x310:
+	case 0x3a0:
+	case 0x3c0:
+		break;
+	default:
+		return;
+	}
+
+	if (regmap_read(ps->regmap, ps->offset, &reg))
+		return;
+
+	dev_info(ps->dev,
+		 "diagnostic: inherited NVMe PMGR state 0x%08x actual=0x%x target=0x%x auto=%u was_clk=%u was_pwr=%u\n",
+		 reg, (unsigned int)FIELD_GET(APPLE_PMGR_PS_ACTUAL, reg),
+		 (unsigned int)FIELD_GET(APPLE_PMGR_PS_TARGET, reg),
+		 !!(reg & APPLE_PMGR_AUTO_ENABLE),
+		 !!(reg & APPLE_PMGR_WAS_CLKGATED),
+		 !!(reg & APPLE_PMGR_WAS_PWRGATED));
 }
 
 static int apple_pmgr_ps_power_on(struct generic_pm_domain *genpd)
@@ -162,10 +381,10 @@ static int apple_pmgr_reset_assert(struct reset_controller_dev *rcdev, unsigned 
 
 	dev_dbg(ps->dev, "PS 0x%x: assert reset\n", ps->offset);
 	/* Quiesce device before asserting reset */
-	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE,
-			   APPLE_PMGR_DEV_DISABLE);
-	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_RESET,
-			   APPLE_PMGR_RESET);
+	apple_pmgr_update_bits(ps, APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE,
+			       APPLE_PMGR_DEV_DISABLE, "reset-assert-disable");
+	apple_pmgr_update_bits(ps, APPLE_PMGR_FLAGS | APPLE_PMGR_RESET,
+			       APPLE_PMGR_RESET, "reset-assert");
 
 	spin_unlock_irqrestore(&ps->genpd.slock, flags);
 
@@ -180,8 +399,10 @@ static int apple_pmgr_reset_deassert(struct reset_controller_dev *rcdev, unsigne
 	spin_lock_irqsave(&ps->genpd.slock, flags);
 
 	dev_dbg(ps->dev, "PS 0x%x: deassert reset\n", ps->offset);
-	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_RESET, 0);
-	regmap_update_bits(ps->regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE, 0);
+	apple_pmgr_update_bits(ps, APPLE_PMGR_FLAGS | APPLE_PMGR_RESET, 0,
+			       "reset-deassert");
+	apple_pmgr_update_bits(ps, APPLE_PMGR_FLAGS | APPLE_PMGR_DEV_DISABLE, 0,
+			       "reset-deassert-enable");
 
 	if (ps->genpd.status == GENPD_STATE_OFF)
 		dev_err(ps->dev, "PS 0x%x: RESET was deasserted while powered down\n", ps->offset);
@@ -268,8 +489,9 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 
 	ret = of_property_read_u32(node, "apple,min-state", &ps->min_state);
 	if (ret == 0 && ps->min_state <= APPLE_PMGR_PS_ACTIVE)
-		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_PS_MIN,
-				   FIELD_PREP(APPLE_PMGR_PS_MIN, ps->min_state));
+		apple_pmgr_update_bits(ps, APPLE_PMGR_FLAGS | APPLE_PMGR_PS_MIN,
+				       FIELD_PREP(APPLE_PMGR_PS_MIN, ps->min_state),
+				       "probe-min-state");
 
 	if (of_property_read_bool(node, "apple,force-disable"))
 		ps->force_disable = true;
@@ -281,6 +503,7 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 		ps->externally_clocked = true;
 
 	active = apple_pmgr_ps_is_active(ps);
+	apple_pmgr_log_t8140_nvme_probe_state(ps);
 	if (of_property_read_bool(node, "apple,always-on")) {
 		ps->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
 		if (!active) {
@@ -292,10 +515,15 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 		ps->genpd.flags |= GENPD_FLAG_DEFER_OFF | GENPD_FLAG_ACTIVE_WAKEUP;
 	}
 
-	/* Turn on auto-PM if the domain is already on */
-	if (active)
-		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
-				   APPLE_PMGR_AUTO_ENABLE);
+	/* Turn on auto-PM if the domain is already on. */
+	if (active && !apple_pmgr_preserve_auto_on_probe(ps))
+		apple_pmgr_update_bits(ps, APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
+				       APPLE_PMGR_AUTO_ENABLE,
+				       "probe-auto-enable");
+	else if (active)
+		dev_info(dev,
+			 "diagnostic: preserving firmware AUTO_ENABLE state for %s (mask=0x%x)\n",
+			 name, apple_pmgr_preserve_auto_probe_mask);
 
 	ret = pm_genpd_init(&ps->genpd, NULL, !active);
 	if (ret < 0) {

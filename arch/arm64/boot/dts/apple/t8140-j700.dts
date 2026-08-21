@@ -10,13 +10,14 @@
 /dts-v1/;
 
 #include "t8140.dtsi"
-
 / {
 	compatible = "apple,j700", "apple,t8140", "apple,arm-platform";
 	model = "Apple MacBook Neo";
 
 	aliases {
+		atcphy0 = &atcphy0;
 		serial0 = &serial0;
+		keyboard = &keyboard;
 	};
 
 	chosen {
@@ -48,4 +49,232 @@
 
 &serial0 {
 	status = "okay";
+};
+
+&pinctrl_ap {
+	status = "okay";
+};
+
+/*
+ * Keep the fixed VL122 out of reset for the complete Linux lifetime.  Its I2C
+ * plane NACKs while the USB core is running, so only configure and open the
+ * independent TICD2E22 eUSB repeater at address 0x21.
+ */
+&i2c2 {
+	apple,j700-usb-apply-repeater-tunable;
+	apple,j700-usb-read-only-diagnostics;
+	hub-reset-gpios = <&pinctrl_ap 142 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+};
+
+&dwc3_0 {
+	/delete-property/ hub-reset-gpios;
+	apple,usb2-hub-always-on;
+	status = "okay";
+
+	/*
+	 * One fixed VL122 hub fans this DWC3 USB2 link out to both HPMs.  Keep
+	 * separate role-switch inputs so either connector can report cable state
+	 * without tearing down or stealing the shared always-on host.
+	 */
+	usb2-role-inputs {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		usb2-role-input@0 {
+			reg = <0>;
+			usb-role-switch;
+
+			port {
+				dwc3_0_hs_rear: endpoint {
+					remote-endpoint = <&typec0_connector_hs>;
+				};
+			};
+		};
+
+		usb2-role-input@1 {
+			reg = <1>;
+			usb-role-switch;
+
+			port {
+				dwc3_0_hs_front: endpoint {
+					remote-endpoint = <&typec1_connector_hs>;
+				};
+			};
+		};
+	};
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+
+			dwc3_0_ss: endpoint {
+				remote-endpoint = <&atcphy0_usb3>;
+			};
+		};
+	};
+};
+
+/*
+ * J700 has one DWC3 and two HPMs.  Both connectors' USB2 signals reach DWC3
+ * through the permanently connected VL122 hub, so neither HPM is a USB2 role
+ * source: disconnecting either downstream cable must leave the host and hub
+ * running.  The rear/DFU-side HPM owns the only direct ATC/SuperSpeed lane;
+ * the front connector has no direct ATC endpoint.
+ */
+&nub_spmi_a0 {
+	status = "okay";
+
+	hpm0: usb-pd@c {
+		compatible = "apple,sn201202x";
+		reg = <0xc SPMI_USID>;
+		interrupts = <11 IRQ_TYPE_EDGE_RISING>,
+			     <13 IRQ_TYPE_EDGE_RISING>,
+			     <17 IRQ_TYPE_EDGE_RISING>,
+			     <19 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+
+		typec0: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left-rear";
+			power-role = "dual";
+			data-role = "host";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					typec0_connector_hs: endpoint {
+						remote-endpoint = <&dwc3_0_hs_rear>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					typec0_connector_ss: endpoint {
+						remote-endpoint = <&atcphy0_typec_lanes>;
+					};
+				};
+			};
+		};
+	};
+
+	hpm1: usb-pd@a {
+		compatible = "apple,sn201202x";
+		reg = <0xa SPMI_USID>;
+		interrupts = <37 IRQ_TYPE_EDGE_RISING>,
+			     <39 IRQ_TYPE_EDGE_RISING>,
+			     <43 IRQ_TYPE_EDGE_RISING>,
+			     <45 IRQ_TYPE_EDGE_RISING>;
+		interrupt-names = "irq", "select", "sleep", "wake";
+
+		typec1: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left-front";
+			power-role = "dual";
+			data-role = "host";
+
+			port {
+				typec1_connector_hs: endpoint {
+					remote-endpoint = <&dwc3_0_hs_front>;
+				};
+			};
+		};
+	};
+};
+
+&atcphy0 {
+	/*
+	 * Live J700 ADT tunable_USB2PHY_REG_DFLT.  XNU applies this to ATC
+	 * memory region 2 at the end of AppleT8130TypeCPhy::eusb2phy_init().
+	 */
+	apple,tunable-usb2phy-reg-dflt =
+		<0x80 0x000000ff 0x00000017>,
+		<0x84 0x000003ff 0x000000c8>,
+		<0x88 0x000000ff 0x00000005>,
+		<0x8c 0x000003ff 0x00000005>;
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+
+			atcphy0_typec_lanes: endpoint {
+				remote-endpoint = <&typec0_connector_ss>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+
+			atcphy0_usb3: endpoint {
+				remote-endpoint = <&dwc3_0_ss>;
+			};
+		};
+	};
+};
+
+&dwc3_0_dart_0 {
+	status = "okay";
+};
+
+&dwc3_0_dart_1 {
+	status = "okay";
+};
+
+/*
+ * iBoot leaves both SMC I2C domains active.  Powering either one down on
+ * J700 causes a delayed SError, so Linux must preserve the inherited state.
+ */
+&ps_smc_i2cm1 {
+	apple,always-on;
+};
+
+&ps_smc_i2cm2 {
+	apple,always-on;
+};
+
+/*
+ * Keep U-Boot from owning this transport on T8140.  Its driver explicitly
+ * declines the device before touching RTKit; Linux must initialize MTP first.
+ */
+&mtp {
+	status = "okay";
+};
+
+&mtp_mbox {
+	status = "okay";
+};
+
+&mtp_dart {
+	status = "okay";
+};
+
+&mtp_dockchannel {
+	status = "okay";
+};
+
+&mtp_hid {
+	apple,no-stm;
+
+	multi-touch {
+		firmware-name = "apple/tpmtfw-j700.bin";
+		apple,adopt-preinitialized-ipd-functions;
+		apple,ack-preinitialized-afe-pulse;
+	};
+
+	keyboard: keyboard {
+		hid-country-code = <33>;
+		apple,keyboard-layout-id = <5>;
+	};
 };

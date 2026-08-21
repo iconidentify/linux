@@ -434,6 +434,7 @@ out_free_irq_data:
 static int apple_gpio_pinctrl_probe(struct platform_device *pdev)
 {
 	struct apple_gpio_pinctrl *pctl;
+	struct regmap_config pctl_regmap_config = regmap_config;
 	struct pinctrl_pin_desc *pins;
 	unsigned int npins;
 	const char **pin_names;
@@ -475,7 +476,20 @@ static int apple_gpio_pinctrl_probe(struct platform_device *pdev)
 	if (IS_ERR(pctl->base))
 		return PTR_ERR(pctl->base);
 
-	pctl->map = devm_regmap_init_mmio(&pdev->dev, pctl->base, &regmap_config);
+	/*
+	 * Some newer platforms have GPIO register slots which synchronously
+	 * abort when read.  The flat regcache populates itself by reading every
+	 * slot during probe, including pins Linux never requested.  Let affected
+	 * boards opt out while retaining normal read/modify/write GPIO access.
+	 */
+	if (of_property_read_bool(pdev->dev.of_node, "apple,no-regcache")) {
+		pctl_regmap_config.cache_type = REGCACHE_NONE;
+		pctl_regmap_config.num_reg_defaults_raw = 0;
+		dev_info(&pdev->dev, "register cache disabled\n");
+	}
+
+	pctl->map = devm_regmap_init_mmio(&pdev->dev, pctl->base,
+					 &pctl_regmap_config);
 	if (IS_ERR(pctl->map))
 		return dev_err_probe(&pdev->dev, PTR_ERR(pctl->map),
 				     "Failed to create regmap\n");

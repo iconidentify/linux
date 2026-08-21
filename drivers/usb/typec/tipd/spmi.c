@@ -223,8 +223,17 @@ static int sn201202x_probe(struct spmi_device *device)
 		return -ETIMEDOUT;
 
 	ret = tipd_init(tps);
-	if (ret)
+	if (ret) {
+		dev_err(&device->dev,
+			"J700_HPM_PROBE_FAIL: usid=%u err=%d\n",
+			device->usid, ret);
 		spmi_command_sleep(device);
+	} else {
+		dev_info(&device->dev,
+			 "J700_HPM_PROBE_PASS: usid=%u status=%08x data=%08x power=%04x\n",
+			 device->usid, tps->status, tps->data_status,
+			 tps->pwr_status);
+	}
 	return ret;
 }
 

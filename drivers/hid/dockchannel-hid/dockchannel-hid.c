@@ -477,6 +477,22 @@ static int dchid_request_gpio(struct dchid_iface *iface)
 	return 0;
 }
 
+static bool dchid_adopt_preinitialized_ipd_functions(struct dchid_iface *iface)
+{
+	/*
+	 * J700 no longer describes the trackpad reset as an SMC GPIO.  Its ADT
+	 * uses an eight-byte pcIO platform-key write plus a separate pmIP power
+	 * sequence, both of which iBoot has already applied before the live MTP
+	 * handoff.  Keep this adoption path deliberately narrower than the GPIO
+	 * fallback: an unknown interface or request must still fail closed.
+	 */
+	return of_property_read_bool(iface->dchid->dev->of_node, "apple,no-stm") &&
+	       of_property_read_bool(iface->of_node,
+				     "apple,adopt-preinitialized-ipd-functions") &&
+	       !strcmp(iface->name, "multi-touch") &&
+	       !strcmp(iface->gpio_name, "afe-reset");
+}
+
 static int dchid_start_interface(struct dchid_iface *iface)
 {
 	void *fw;
@@ -499,9 +515,15 @@ static int dchid_start_interface(struct dchid_iface *iface)
 
 	/* If we need a GPIO, make sure we have it. */
 	if (iface->gpio_id) {
-		ret = dchid_request_gpio(iface);
-		if (ret < 0)
-			goto err;
+		if (dchid_adopt_preinitialized_ipd_functions(iface)) {
+			dev_info(iface->dchid->dev,
+				 "J700_MTP_IPD_ADOPT: interface=%s id=%u request=%s pcIO=live pmIP=live\n",
+				 iface->name, iface->gpio_id, iface->gpio_name);
+		} else {
+			ret = dchid_request_gpio(iface);
+			if (ret < 0)
+				goto err;
+		}
 	}
 
 	/* Only multi-touch has firmware */
@@ -819,6 +841,9 @@ static void dchid_handle_init(struct dockchannel_hid *dchid, void *data, size_t 
 
 			strscpy(iface->gpio_name, req->name, MAX_GPIO_NAME);
 			iface->gpio_id = req->id;
+			dev_info(dchid->dev,
+				 "Interface %s requested reset GPIO id=%u name=%s\n",
+				 iface->name, iface->gpio_id, iface->gpio_name);
 			break;
 		}
 
@@ -877,6 +902,40 @@ static void dchid_handle_gpio(struct dockchannel_hid *dchid, void *data, size_t 
 		goto err;
 	}
 
+	dev_info(dchid->dev, "GPIO command received: %s#%d cmd=%d\n",
+		 iface->name, cmd->gpio, cmd->cmd);
+
+	/*
+	 * J700's AFE reset is an eight-byte pcIO platform-key operation rather
+	 * than a conventional GPIO.  A dedicated diagnostic may acknowledge the
+	 * pulse without touching SMC so we can establish whether iBoot's inherited
+	 * IPD state is already sufficient.  This is deliberately gated by the same
+	 * exact interface contract as startup adoption and by a second DT opt-in;
+	 * it must never turn an unknown GPIO request into a successful no-op.
+	 */
+	if (dchid_adopt_preinitialized_ipd_functions(iface) &&
+	    of_property_read_bool(iface->of_node,
+				  "apple,ack-preinitialized-afe-pulse")) {
+		if (cmd->gpio != iface->gpio_id) {
+			dev_err(dchid->dev,
+				"Got adopted IPD command for bad GPIO %s#%d\n",
+				iface->name, cmd->gpio);
+			goto err;
+		}
+
+		if (cmd->cmd != 3) {
+			dev_err(dchid->dev,
+				"Unknown adopted IPD GPIO command %d\n", cmd->cmd);
+			goto err;
+		}
+
+		dev_info(dchid->dev,
+			 "J700_MTP_AFE_ACK_ONLY: interface=%s id=%u cmd=%u pcIO_writes=0\n",
+			 iface->name, iface->gpio_id, cmd->cmd);
+		retcode = 0;
+		goto ack;
+	}
+
 	if (dchid_request_gpio(iface) < 0)
 		goto err;
 
@@ -889,19 +948,42 @@ static void dchid_handle_gpio(struct dockchannel_hid *dchid, void *data, size_t 
 	dev_info(dchid->dev, "GPIO command: %s#%d: %d\n", iface->name, cmd->gpio, cmd->cmd);
 
 	switch (cmd->cmd) {
-	case 3:
-		/* Pulse.  */
+	case 3: {
+		u32 pulse_us = 10000;
+
+		/*
+		 * Older platforms never described the timing, so preserve their
+		 * historical 10-ms default.  J700's shipping MTP_SYS config gives
+		 * an exact 50-ms AFE disable delay and opts in through its interface
+		 * child instead of carrying another platform guess here.
+		 */
+		of_property_read_u32(iface->of_node, "apple,reset-pulse-us",
+				     &pulse_us);
+		if (!pulse_us || pulse_us > USEC_PER_SEC) {
+			dev_err(dchid->dev,
+				"Invalid reset pulse for %s: %u us\n",
+				iface->name, pulse_us);
+			break;
+		}
+
+		dev_info(dchid->dev,
+			 "GPIO pulse: %s#%d assert_us=%u\n",
+			 iface->name, cmd->gpio, pulse_us);
 		gpiod_set_value_cansleep(iface->gpio, 1);
-		msleep(10); /* Random guess... */
+		fsleep(pulse_us);
 		gpiod_set_value_cansleep(iface->gpio, 0);
 		retcode = 0;
 		break;
+	}
 	default:
 		dev_err(dchid->dev, "Unknown GPIO command %d\n", cmd->cmd	);
 		break;
 	}
 
 err:
+	/* Keep the firmware-visible acknowledgement format identical on errors. */
+	;
+ack:
 	/* Ack it */
 	ack = kzalloc(sizeof(*ack) + length, GFP_KERNEL);
 	if (!ack)
@@ -1178,6 +1260,20 @@ static int dockchannel_hid_probe(struct platform_device *pdev)
 	if (!dchid->comm) {
 		dev_err(dchid->dev, "Failed to initialize comm interface");
 		return -EIO;
+	}
+
+	/*
+	 * M4-generation MTP firmware no longer advertises the STM interface that
+	 * older machines use to return the common HID identity.  Waiting for STM
+	 * in that topology leaves every real interface deferred forever.  The
+	 * per-interface descriptors are still delivered by MTP, so use the only
+	 * identity value needed to enumerate them and let the DT opt in to the
+	 * no-STM protocol variant.
+	 */
+	if (of_property_read_bool(dev->of_node, "apple,no-stm")) {
+		dchid->device_id.vendor_id = HOST_VENDOR_ID_APPLE;
+		dchid->id_ready = true;
+		dev_info(dev, "No STM interface; using fallback Apple HID identity\n");
 	}
 
 	dev_info(dchid->dev, "Initialized, awaiting packets\n");

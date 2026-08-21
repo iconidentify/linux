@@ -7,6 +7,10 @@
 
 #include <dt-bindings/interrupt-controller/apple-aic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/apple.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/spmi/spmi.h>
 
 / {
 	compatible = "apple,t8140", "apple,arm-platform";
@@ -147,6 +151,115 @@
 			/* child nodes are added in t8140-pmgr.dtsi */
 		};
 
+		nub_spmi_a0: spmi@308908000 {
+			compatible = "apple,t8140-spmi", "apple,t8103-spmi";
+			reg = <0x3 0x08908000 0x0 0x100>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+			#interrupt-cells = <2>;
+			interrupt-controller;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 494 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_nub_spmi_a0>;
+		};
+
+		pinctrl_ap: pinctrl@31a000000 {
+			compatible = "apple,t8140-pinctrl", "apple,t8103-pinctrl";
+			reg = <0x3 0x1a000000 0x0 0x100000>;
+			power-domains = <&ps_gpio>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl_ap 0 0 216>;
+			apple,npins = <216>;
+			apple,no-regcache;
+			/* ADT no-restore-gpio-pins entries: 50 and 134. */
+			gpio-reserved-ranges = <50 1>, <134 1>;
+			status = "disabled";
+
+			i2c2_pins: i2c2-pins {
+				pinmux = <APPLE_PINMUX(165, 1)>,
+					 <APPLE_PINMUX(164, 1)>;
+			};
+		};
+
+		i2c2: i2c@385018000 {
+			compatible = "apple,t8140-i2c", "apple,i2c";
+			reg = <0x3 0x85018000 0x0 0x4000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1110 IRQ_TYPE_LEVEL_HIGH>;
+			pinctrl-0 = <&i2c2_pins>;
+			pinctrl-names = "default";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			power-domains = <&ps_i2c2>;
+			status = "disabled";
+		};
+
+		dwc3_0: usb@40a280000 {
+			compatible = "apple,t8140-dwc3", "apple,t8103-dwc3";
+			reg = <0x4 0x0a280000 0x0 0xcd00>,
+			      <0x4 0x0a28cd00 0x0 0x3200>;
+			reg-names = "dwc3-core", "dwc3-apple";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1244 IRQ_TYPE_LEVEL_HIGH>;
+			dr_mode = "otg";
+			usb-role-switch;
+			role-switch-default-mode = "host";
+			iommus = <&dwc3_0_dart_0 0>, <&dwc3_0_dart_1 1>;
+			power-domains = <&ps_atc0_usb>;
+			resets = <&atcphy0>;
+			phys = <&atcphy0 PHY_TYPE_USB2>, <&atcphy0 PHY_TYPE_USB3>;
+			phy-names = "usb2-phy", "usb3-phy";
+			hub-reset-gpios = <&pinctrl_ap 142 GPIO_ACTIVE_LOW>;
+			status = "disabled";
+		};
+
+		dwc3_0_dart_0: iommu@40af00000 {
+			compatible = "apple,t8140-dart", "apple,t8110-dart";
+			reg = <0x4 0x0af00000 0x0 0xc000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1248 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc0_usb>;
+			#iommu-cells = <1>;
+			apple,dma-range = <0x100 0x00004000 0x0 0xffff0000>;
+			status = "disabled";
+		};
+
+		dwc3_0_dart_1: iommu@40af80000 {
+			compatible = "apple,t8140-dart", "apple,t8110-dart";
+			reg = <0x4 0x0af80000 0x0 0xc000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1248 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc0_usb>;
+			#iommu-cells = <1>;
+			apple,dma-range = <0x100 0x00004000 0x0 0xffff0000>;
+			status = "disabled";
+		};
+
+		atcphy0: phy@40b000000 {
+			compatible = "apple,t8130-atcphy", "apple,t8122-atcphy";
+			reg = <0x4 0x0b000000 0x0 0x4c000>,
+			      <0x4 0x0b050000 0x0 0x4000>,
+			      <0x4 0x08000000 0x0 0x8000>,
+			      <0x4 0x0aa90000 0x0 0x4000>,
+			      <0x4 0x0aa84000 0x0 0x4000>,
+			      <0x4 0x0a300000 0x0 0x4000>;
+			reg-names = "core", "lpdptx", "axi2af", "usb2phy",
+				    "pipehandler", "usb2phy-reg";
+
+			#phy-cells = <1>;
+			#reset-cells = <0>;
+
+			orientation-switch;
+			mode-switch;
+			power-domains = <&ps_atc0_usb>;
+			apple,force-usb2-on;
+			apple,force-usb2-host-preinit;
+			status = "disabled";
+		};
+
 		aic: interrupt-controller@301000000 {
 			compatible = "apple,t8140-aic3", "apple,t8122-aic3";
 			#interrupt-cells = <3>;
@@ -166,6 +279,121 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 470 IRQ_TYPE_LEVEL_HIGH>;
 			status = "disabled";
+		};
+
+		mtp: mtp@314600000 {
+			compatible = "apple,t8140-mtp",
+				     "apple,t8140-rtk-helper-asc4",
+				     "apple,mtp", "apple,rtk-helper-asc4";
+			reg = <0x3 0x14600000 0x0 0x4000>,
+			      <0x3 0x14050000 0x0 0x4000>;
+			reg-names = "asc", "sram";
+			mboxes = <&mtp_mbox>;
+			iommus = <&mtp_dart 0>;
+			#helper-cells = <0>;
+			status = "disabled";
+		};
+
+		mtp_mbox: mailbox@314608000 {
+			compatible = "apple,t8140-asc-mailbox",
+				     "apple,asc-mailbox-v4";
+			reg = <0x3 0x14608000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1152 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 1153 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 1154 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 1155 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			status = "disabled";
+		};
+
+		mtp_dart: iommu@314800000 {
+			compatible = "apple,t8140-dart", "apple,t8110-dart";
+			reg = <0x3 0x14800000 0x0 0xc000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1135 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,dma-range = <0x100 0x00004000 0x0 0xffff0000>;
+			status = "disabled";
+		};
+
+		mtp_dockchannel: fifo@314b14000 {
+			compatible = "apple,t8140-dockchannel", "apple,dockchannel";
+			reg = <0x3 0x14b14000 0x0 0x4000>;
+			reg-names = "irq";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1137 IRQ_TYPE_LEVEL_HIGH>;
+
+			ranges = <0x0 0x3 0x14b28000 0x20000>;
+			nonposted-mmio;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			status = "disabled";
+
+			mtp_hid: input@8000 {
+				compatible = "apple,dockchannel-hid";
+				reg = <0x8000 0x4000>,
+				      <0xc000 0x4000>,
+				      <0x0000 0x4000>,
+				      <0x4000 0x4000>;
+				reg-names = "config", "data",
+					    "rmt-config", "rmt-data";
+				/* T8140 uses stream ID 0 for MTP, unlike older T8122. */
+				iommus = <&mtp_dart 0>;
+				interrupt-parent = <&mtp_dockchannel>;
+				interrupts = <2 IRQ_TYPE_LEVEL_HIGH>,
+					     <3 IRQ_TYPE_LEVEL_HIGH>;
+				interrupt-names = "tx", "rx";
+				apple,fifo-size = <0x800>;
+				apple,helper-cpu = <&mtp>;
+			};
+		};
+
+		/*
+		 * Live J700 ADT /arm-io/smc.  The ASC and SRAM bases come from
+		 * reg[0] and the iop-smc-nub region-base respectively.  The ADT
+		 * mailbox interrupt tuple is ordered as paired pending/empty IRQs;
+		 * normalize it to the Linux mailbox binding's ascending channel
+		 * order, as is already done for the T8140 MTP mailbox above.
+		 *
+		 * Keep this disabled in the SoC description.  J700 must first prove
+		 * inherited-session adoption without the ordinary macsmc notification
+		 * and child-device writes before a board DTS enables it.
+		 */
+		smc_mbox: mailbox@30c608000 {
+			compatible = "apple,t8140-asc-mailbox",
+				     "apple,asc-mailbox-v4";
+			reg = <0x3 0x0c608000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 581 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 582 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 583 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 584 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			status = "disabled";
+		};
+
+		smc: smc@30c600000 {
+			compatible = "apple,t8140-smc", "apple,t8103-smc",
+				     "apple,smc";
+			reg = <0x3 0x0c600000 0x0 0x4000>,
+			      <0x3 0x0e000000 0x0 0x100000>;
+			reg-names = "smc", "sram";
+			mboxes = <&smc_mbox>;
+			status = "disabled";
+
+			smc_gpio: gpio {
+				compatible = "apple,smc-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+			};
 		};
 
 		ans_mbox: mailbox@389608000 {
@@ -191,7 +419,13 @@
 		nvme: nvme@3cdcc0000 {
 			compatible = "apple,t8140-nvme-ans2",
 				     "apple,t8132-nvme-ans2";
-			reg = <0x3 0xcdcc0000 0x0 0x10000>,
+			/*
+			 * The ADT describes reg[9] as 0x10000, but the non-secure
+			 * controller alias also contains the linear-SQ block at
+			 * +0x24908..+0x24910.  Map through that block; otherwise the
+			 * post-M4 submission doorbells land beyond Linux's ioremap.
+			 */
+			reg = <0x3 0xcdcc0000 0x0 0x30000>,
 			      <0x3 0x89600000 0x0 0x4000>,
 			      <0x3 0x8dcc0000 0x0 0x60000>;
 			reg-names = "nvme", "ans", "nvmmu";

@@ -54,6 +54,11 @@ static const struct mfd_cell apple_smc_devs[] = {
 	MFD_CELL_OF("macsmc-rtc", NULL, NULL, 0, 0, "apple,smc-rtc"),
 };
 
+/* J700 diagnostic gate: expose only the established gPxx GPIO bank. */
+static const struct mfd_cell apple_smc_gpio_devs[] = {
+	MFD_CELL_OF("macsmc-gpio", NULL, NULL, 0, 0, "apple,smc-gpio"),
+};
+
 static int apple_smc_cmd_locked(struct apple_smc *smc, u64 cmd, u64 arg,
 				  u64 size, u64 wsize, u32 *ret_data)
 {
@@ -407,12 +412,43 @@ static void apple_smc_disable_notifications(void *data)
 	apple_smc_write_flag(smc, SMC_KEY(NTAP), false);
 }
 
+static int apple_smc_j700_log_function_key(struct apple_smc *smc,
+					    smc_key key, const char *name)
+{
+	struct apple_smc_key_info info;
+	int ret;
+
+	ret = apple_smc_get_key_info(smc, key, &info);
+	if (ret < 0)
+		return dev_err_probe(smc->dev, ret,
+				     "Failed to read J700 %s key metadata\n", name);
+
+	dev_info(smc->dev,
+		 "J700_SMC_FUNCTION_KEY: name=%s key=%08x size=%u type=%08x flags=%02x readable=%u writable=%u function=%u\n",
+		 name, key, info.size, info.type_code, info.flags,
+		 !!(info.flags & APPLE_SMC_READABLE),
+		 !!(info.flags & APPLE_SMC_WRITABLE),
+		 !!(info.flags & APPLE_SMC_FUNCTION));
+
+	return 0;
+}
+
 static int apple_smc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct apple_smc *smc;
+	bool j700_gpio_only;
+	bool j700_read_only;
 	__be32 count;
 	int ret;
+
+	j700_read_only = of_property_read_bool(dev->of_node,
+					       "apple,j700-read-only-diagnostics");
+	j700_gpio_only = of_property_read_bool(dev->of_node,
+					      "apple,j700-gpio-only");
+	if (j700_read_only && j700_gpio_only)
+		return dev_err_probe(dev, -EINVAL,
+				     "J700 SMC diagnostic modes are mutually exclusive\n");
 
 	smc = devm_kzalloc(dev, sizeof(*smc), GFP_KERNEL);
 	if (!smc)
@@ -468,6 +504,50 @@ static int apple_smc_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return dev_err_probe(smc->dev, ret, "Failed to get key count");
 	smc->key_count = be32_to_cpu(count);
+
+	/*
+	 * J700's shipping multi-touch contract names two SMC functions, but the
+	 * first hardware gate must not execute them.  Probe only their key
+	 * metadata and deliberately skip NTAP plus every MFD child, since both
+	 * paths can issue unrelated writes.  This remains opt-in and has no effect
+	 * on the normal macsmc path or any existing platform DT.
+	 */
+	if (j700_read_only || j700_gpio_only) {
+		ret = apple_smc_j700_log_function_key(smc, SMC_KEY(pcIO),
+						      "pcIO");
+		if (ret)
+			return ret;
+		ret = apple_smc_j700_log_function_key(smc, SMC_KEY(pmIP),
+						      "pmIP");
+		if (ret)
+			return ret;
+
+		if (j700_read_only) {
+			dev_info(smc->dev,
+				 "J700_SMC_READ_ONLY_READY: keys=%u key_writes=0 notifications=0 children=0\n",
+				 smc->key_count);
+			return 0;
+		}
+
+		/*
+		 * A J700 pKW8 function with a 0x80000 mask was proven on the
+		 * machine through existing gP08.  The AFE function's 0x10000 mask
+		 * therefore maps to gP01.  Register only that established GPIO
+		 * provider and leave notifications plus unrelated children off.
+		 */
+		ret = devm_mfd_add_devices(smc->dev, PLATFORM_DEVID_NONE,
+					   apple_smc_gpio_devs,
+					   ARRAY_SIZE(apple_smc_gpio_devs),
+					   NULL, 0, NULL);
+		if (ret)
+			return dev_err_probe(smc->dev, ret,
+					     "Failed to register J700 SMC GPIO provider");
+
+		dev_info(smc->dev,
+			 "J700_SMC_GPIO_ONLY_READY: keys=%u notifications=0 children=macsmc-gpio\n",
+			 smc->key_count);
+		return 0;
+	}
 
 	/* Enable notifications */
 	apple_smc_write_flag(smc, SMC_KEY(NTAP), true);

@@ -86,6 +86,10 @@
 #define NVME_MAX_KB_SZ 4096
 #define NVME_MAX_SEGS  127
 
+#define APPLE_NVME_INHERITED_RTKIT_RANGES_PROP \
+	"apple,inherited-rtkit-buffer-ranges"
+#define APPLE_NVME_MAX_INHERITED_RTKIT_RANGES 8
+
 /*
  * This controller comes with an embedded IOMMU known as NVMMU.
  * The NVMMU is pointed to an array of TCBs indexed by the command tag.
@@ -275,10 +279,38 @@ static void apple_nvme_rtkit_crashed(void *cookie, const void *crashlog, size_t 
 	nvme_reset_ctrl(&anv->ctrl);
 }
 
+static bool apple_nvme_in_inherited_rtkit_range(struct apple_nvme *anv,
+						 struct apple_rtkit_shmem *bfr)
+{
+	u64 ranges[APPLE_NVME_MAX_INHERITED_RTKIT_RANGES * 2];
+	int count;
+
+	count = of_property_count_u64_elems(anv->dev->of_node,
+					    APPLE_NVME_INHERITED_RTKIT_RANGES_PROP);
+	if (count < 2 || count > ARRAY_SIZE(ranges) || count % 2)
+		return false;
+	if (of_property_read_u64_array(anv->dev->of_node,
+				       APPLE_NVME_INHERITED_RTKIT_RANGES_PROP,
+				       ranges, count))
+		return false;
+
+	for (int i = 0; i < count; i += 2) {
+		u64 start = ranges[i];
+		u64 size = ranges[i + 1];
+
+		if (bfr->iova >= start && bfr->size <= size &&
+		    bfr->iova - start <= size - bfr->size)
+			return true;
+	}
+
+	return false;
+}
+
 static int apple_nvme_sart_dma_setup(void *cookie,
 				     struct apple_rtkit_shmem *bfr)
 {
 	struct apple_nvme *anv = cookie;
+	bool inherited_shared;
 	int ret;
 
 	if (!bfr->size)
@@ -289,19 +321,34 @@ static int apple_nvme_sart_dma_setup(void *cookie,
 		 * Stage 1.  Their identity IOVAs remain SART-authorized and the
 		 * firmware requests that the new owner map, rather than replace,
 		 * them.  Never accept this path for an ordinary Linux-owned session.
+		 *
+		 * A resident Stage 1 may deliberately live outside the RAM exposed
+		 * to its Linux guest.  Such a buffer is safe to retain only when the
+		 * resident owner explicitly grants its exact SART range in the DT and
+		 * maps that range into the guest.  Retained post-M4 firmware does not
+		 * reliably resume admin I/O after this buffer is replaced.
 		 */
-		if (!anv->owns_rtkit ||
-		    region_intersects(bfr->iova, bfr->size,
-				      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) !=
-			    REGION_INTERSECTS)
+		if (!anv->owns_rtkit)
 			return -EINVAL;
 
-		bfr->buffer = memremap(bfr->iova, bfr->size, MEMREMAP_WB);
-		if (!bfr->buffer)
-			return -ENOMEM;
-		bfr->is_mapped = true;
-		bfr->private = anv;
-		return 0;
+		inherited_shared = apple_nvme_in_inherited_rtkit_range(anv, bfr);
+		if (region_intersects(bfr->iova, bfr->size,
+				      IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) ==
+			    REGION_INTERSECTS ||
+		    inherited_shared) {
+			bfr->buffer = memremap(bfr->iova, bfr->size, MEMREMAP_WB);
+			if (!bfr->buffer)
+				return -ENOMEM;
+			bfr->is_mapped = true;
+			bfr->private = anv;
+			if (inherited_shared)
+				dev_info(anv->dev,
+					 "mapping resident-EL2 inherited RTKit buffer: %pad+0x%zx\n",
+					 &bfr->iova, bfr->size);
+			return 0;
+		}
+
+		return -EINVAL;
 	}
 
 	bfr->buffer =
@@ -392,6 +439,21 @@ static void apple_nvme_submit_cmd_t8103(struct apple_nvme_queue *q,
 		tcb->dma_flags = APPLE_ANS_TCB_DMA_FROM_DEVICE;
 
 	memcpy(&q->sqes[tag], cmd, sizeof(*cmd));
+
+	if (!q->is_adminq) {
+		dma_addr_t sqe_dma = q->sq_dma_addr + tag * sizeof(*cmd);
+		dma_addr_t tcb_dma = q->tcb_dma_addr + tag * sizeof(*tcb);
+
+		dev_info_once(anv->dev,
+			      "first I/O submit: tag=%u opcode=0x%02x SQE=%pad TCB=%pad PRP1=0x%016llx PRP2=0x%016llx len=0x%04x flags=0x%02x\n",
+			      tag, cmd->common.opcode, &sqe_dma, &tcb_dma,
+			      le64_to_cpu(cmd->common.dptr.prp1),
+			      le64_to_cpu(cmd->common.dptr.prp2),
+			      le16_to_cpu(tcb->length), tcb->dma_flags);
+	}
+
+	/* Make the SQE and its NVMMU TCB visible before ANS sees the tag. */
+	dma_wmb();
 
 	/*
 	 * This lock here doesn't make much sense at a first glance but
@@ -1027,10 +1089,30 @@ static enum blk_eh_timer_return apple_nvme_timeout(struct request *req)
 	struct apple_nvme_iod *iod = blk_mq_rq_to_pdu(req);
 	struct apple_nvme_queue *q = iod->q;
 	struct apple_nvme *anv = queue_to_apple_nvme(q);
+	struct nvme_completion *cqe = &q->cqes[q->cq_head];
+	enum nvme_ctrl_state state = nvme_ctrl_state(&anv->ctrl);
 	unsigned long flags;
+	u32 cc = readl(anv->mmio_nvme + NVME_REG_CC);
 	u32 csts = readl(anv->mmio_nvme + NVME_REG_CSTS);
 
-	if (nvme_ctrl_state(&anv->ctrl) != NVME_CTRL_LIVE) {
+	/*
+	 * The first Identify runs while the controller is CONNECTING.  Poll the
+	 * completion queue before applying the non-live fast-fail rule so a lost
+	 * interrupt cannot turn a completed initialization command into a reset.
+	 */
+	if (!apple_rtkit_is_crashed(anv->rtk) && !(csts & NVME_CSTS_CFS)) {
+		spin_lock_irqsave(&anv->lock, flags);
+		apple_nvme_handle_cq(q, false);
+		spin_unlock_irqrestore(&anv->lock, flags);
+		if (blk_mq_request_completed(req)) {
+			dev_warn(anv->dev,
+				 "I/O %d(aq:%d) timeout in state %d: completion polled\n",
+				 req->tag, q->is_adminq, state);
+			return BLK_EH_DONE;
+		}
+	}
+
+	if (state != NVME_CTRL_LIVE) {
 		/*
 		 * From rdma.c:
 		 * If we are resetting, connecting or deleting we should
@@ -1046,8 +1128,10 @@ static enum blk_eh_timer_return apple_nvme_timeout(struct request *req)
 		 * recovery work, so it's fine that we fail it here.
 		 */
 		dev_warn(anv->dev,
-			 "I/O %d(aq:%d) timeout while not in live state\n",
-			 req->tag, q->is_adminq);
+			 "I/O %d(aq:%d) timeout in state %d CC=0x%08x CSTS=0x%08x CQ=%u/%u status=0x%04x cid=%u\n",
+			 req->tag, q->is_adminq, state, cc, csts, q->cq_head,
+			 q->cq_phase, le16_to_cpu(READ_ONCE(cqe->status)),
+			 le16_to_cpu(READ_ONCE(cqe->command_id)));
 		if (blk_mq_request_started(req) &&
 		    !blk_mq_request_completed(req)) {
 			nvme_req(req)->status = NVME_SC_HOST_ABORTED_CMD;
@@ -1057,25 +1141,15 @@ static enum blk_eh_timer_return apple_nvme_timeout(struct request *req)
 		return BLK_EH_DONE;
 	}
 
-	/* check if we just missed an interrupt if we're still alive */
-	if (!apple_rtkit_is_crashed(anv->rtk) && !(csts & NVME_CSTS_CFS)) {
-		spin_lock_irqsave(&anv->lock, flags);
-		apple_nvme_handle_cq(q, false);
-		spin_unlock_irqrestore(&anv->lock, flags);
-		if (blk_mq_request_completed(req)) {
-			dev_warn(anv->dev,
-				 "I/O %d(aq:%d) timeout: completion polled\n",
-				 req->tag, q->is_adminq);
-			return BLK_EH_DONE;
-		}
-	}
-
 	/*
 	 * aborting commands isn't supported which leaves a full reset as our
 	 * only option here
 	 */
-	dev_warn(anv->dev, "I/O %d(aq:%d) timeout: resetting controller\n",
-		 req->tag, q->is_adminq);
+	dev_warn(anv->dev,
+		 "I/O %d(aq:%d) timeout: resetting controller CC=0x%08x CSTS=0x%08x CQ=%u/%u status=0x%04x cid=%u\n",
+		 req->tag, q->is_adminq, cc, csts, q->cq_head, q->cq_phase,
+		 le16_to_cpu(READ_ONCE(cqe->status)),
+		 le16_to_cpu(READ_ONCE(cqe->command_id)));
 	nvme_req(req)->flags |= NVME_REQ_CANCELLED;
 	apple_nvme_disable(anv, false);
 	nvme_reset_ctrl(&anv->ctrl);
@@ -1363,10 +1437,10 @@ rtkit_ready:
 
 	apple_nvme_init_queue(&anv->ioq);
 	if (anv->hw->needs_ioq_registers) {
-		writeq(anv->ioq.cq_dma_addr,
-		       anv->mmio_nvme + APPLE_ANS_IOCQ_REGISTER);
-		writeq(anv->ioq.sq_dma_addr,
-		       anv->mmio_nvme + APPLE_ANS_IOSQ_REGISTER);
+		apple_nvme_writeq(anv, anv->ioq.cq_dma_addr,
+				  anv->mmio_nvme + APPLE_ANS_IOCQ_REGISTER);
+		apple_nvme_writeq(anv, anv->ioq.sq_dma_addr,
+				  anv->mmio_nvme + APPLE_ANS_IOSQ_REGISTER);
 	}
 	nr_io_queues = 1;
 	if (anv->hw->has_queue_count) {
@@ -1655,6 +1729,7 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct apple_nvme *anv;
+	bool inherited_rtkit;
 	int ret;
 
 	anv = devm_kzalloc(dev, sizeof(*anv), GFP_KERNEL);
@@ -1713,9 +1788,9 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
 	}
 
 	if (anv->hw->has_lsq_nvmmu) {
-		anv->adminq.sq_db = anv->mmio_nvmmu + APPLE_ANS_LINEAR_ASQ_DB;
+		anv->adminq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_ASQ_DB;
 		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;
-		anv->ioq.sq_db = anv->mmio_nvmmu + APPLE_ANS_LINEAR_IOSQ_DB;
+		anv->ioq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_IOSQ_DB;
 		anv->ioq.cq_db = anv->mmio_nvme + APPLE_ANS_IOCQ_DB;
 	} else {
 		anv->adminq.sq_db = anv->mmio_nvme + NVME_REG_DBS;
@@ -1787,8 +1862,22 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
 		goto put_dev;
 	}
 
-	anv->rtk =
-		devm_apple_rtkit_init(dev, anv, NULL, 0, &apple_nvme_rtkit_ops);
+	/*
+	 * A post-M4 boot stage may leave RTKit fully running.  Prime the known
+	 * system endpoints before mailbox RX starts, otherwise inherited syslog
+	 * traffic can race the later reset work and be dropped as undiscovered.
+	 */
+	inherited_rtkit = anv->hw->needs_ioq_registers &&
+		(readl(anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL) &
+		 APPLE_ANS_COPROC_CPU_CONTROL_RUN) &&
+		readl(anv->mmio_nvme + APPLE_ANS_BOOT_STATUS) ==
+		 APPLE_ANS_BOOT_STATUS_OK;
+	if (inherited_rtkit)
+		anv->rtk = devm_apple_rtkit_init_adopted(
+			dev, anv, NULL, 0, &apple_nvme_rtkit_ops);
+	else
+		anv->rtk = devm_apple_rtkit_init(
+			dev, anv, NULL, 0, &apple_nvme_rtkit_ops);
 	if (IS_ERR(anv->rtk)) {
 		ret = dev_err_probe(dev, PTR_ERR(anv->rtk),
 				    "Failed to initialize RTKit");

@@ -78,6 +78,14 @@ struct apple_rtkit;
 struct apple_rtkit *devm_apple_rtkit_init(struct device *dev, void *cookie,
 					  const char *mbox_name, int mbox_idx,
 					  const struct apple_rtkit_ops *ops);
+
+/*
+ * Initialize RTKit for a session that a previous boot stage left running.
+ * System endpoints are marked before mailbox receive processing starts.
+ */
+struct apple_rtkit *devm_apple_rtkit_init_adopted(
+	struct device *dev, void *cookie, const char *mbox_name, int mbox_idx,
+	const struct apple_rtkit_ops *ops);
 /*
  * Frees internal RTKit state allocated by devm_apple_rtkit_init().
  *
@@ -99,6 +107,10 @@ void devm_apple_rtkit_free(struct device *dev, struct apple_rtkit *rtk);
 struct apple_rtkit *apple_rtkit_init(struct device *dev, void *cookie,
 					  const char *mbox_name, int mbox_idx,
 					  const struct apple_rtkit_ops *ops);
+
+struct apple_rtkit *apple_rtkit_init_adopted(
+	struct device *dev, void *cookie, const char *mbox_name, int mbox_idx,
+	const struct apple_rtkit_ops *ops);
 
 /*
  * Free an instance of apple_rtkit.

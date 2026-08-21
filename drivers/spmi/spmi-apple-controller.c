@@ -469,6 +469,10 @@ static int apple_spmi_probe(struct platform_device *pdev)
 		return dev_err_probe(&pdev->dev, ret,
 				     "spmi_controller_add failed\n");
 
+	dev_info(&pdev->dev,
+		 "J700_HPM_SPMI_READY: irq=%d status=%08x\n",
+		 spmi->irq, readl(spmi->regs + SPMI_STATUS_REG));
+
 	return 0;
 }
 
