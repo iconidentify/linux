@@ -2,6 +2,7 @@
 /* Copyright (C) 2020 MediaTek Inc. */
 
 #include <linux/firmware.h>
+#include <linux/delay.h>
 #include "mt76_connac2_mac.h"
 #include "mt76_connac_mcu.h"
 #include "mt792x_regs.h"
@@ -3036,6 +3037,32 @@ int mt76_connac_mcu_rdd_cmd(struct mt76_dev *dev, int cmd, u8 index,
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_rdd_cmd);
 
+static int mt7932_mcu_drain_fwdl(struct mt76_dev *dev)
+{
+	struct mt76_queue *q = dev->q_mcu[MT_MCUQ_FWDL];
+	int i;
+
+	if (!q || !dev->queue_ops->tx_cleanup)
+		return -EOPNOTSUPP;
+
+	for (i = 0; i < 1000; i++) {
+		dev->queue_ops->tx_cleanup(dev, q, false);
+		if (!READ_ONCE(q->queued)) {
+			dev_info(dev->dev,
+				 "J700_MT7932_FWDL_DRAIN_PASS: hw=%u head=%u tail=%u polls=%d\n",
+				 q->hw_idx, q->head, q->tail, i + 1);
+			return 0;
+		}
+		usleep_range(100, 200);
+	}
+
+	dev_err(dev->dev,
+		"J700_MT7932_FWDL_DRAIN_FAIL: hw=%u head=%u tail=%u queued=%d\n",
+		q->hw_idx, q->head, q->tail, q->queued);
+
+	return -ETIMEDOUT;
+}
+
 static int
 mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
 				  const struct mt76_connac2_fw_trailer *hdr,
@@ -3085,6 +3112,11 @@ mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
 
 next:
 		offset += len;
+	}
+	if (is_mt7932(dev)) {
+		ret = mt7932_mcu_drain_fwdl(dev);
+		if (ret)
+			return ret;
 	}
 
 	if (override)
