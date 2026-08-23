@@ -9,7 +9,8 @@
 #include "mt76_connac.h"
 
 #define MT7932_MCU_BOUNCE_STRIDE	8192
-#define MT7932_MCU_WM_BOUNCE_ENTRIES	64
+/* Control commands plus Apple's 65-command pre-RAM OTP sequence. */
+#define MT7932_MCU_WM_BOUNCE_ENTRIES	128
 /* 25G83 needs 17 patch plus 583 RAM scatter payloads at 2 KiB. */
 #define MT7932_MCU_FWDL_BOUNCE_ENTRIES	640
 

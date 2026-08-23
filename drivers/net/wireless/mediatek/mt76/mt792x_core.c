@@ -926,7 +926,8 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 {
 	int ret;
 	bool mt7932 = is_mt7932(&dev->mt76);
-	u8 otp = 0;
+	u8 otp[64] = {};
+	int i;
 
 	mt76_connac_mcu_restart(&dev->mt76);
 
@@ -950,13 +951,27 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 	if (mt7932)
 		dev_info(dev->mt76.dev, "J700_MT7932_PATCH_UPLOAD_PASS\n");
 	if (mt7932) {
-		ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x200, &otp);
+		ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x200, &otp[0]);
 		if (ret) {
 			dev_err(dev->mt76.dev,
 				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=otp-read ret=%d\n",
 				ret);
 			return ret;
 		}
+		if (otp[0] != 0x15)
+			return -EPROTO;
+		for (i = 0; i < ARRAY_SIZE(otp); i++) {
+			ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x200 + i, &otp[i]);
+			if (ret) {
+				dev_err(dev->mt76.dev,
+					"J700_MT7932_FIRMWARE_GATE_FAIL: stage=otp-sweep addr=0x%04x ret=%d\n",
+					0x200 + i, ret);
+				return ret;
+			}
+		}
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_OTP_SWEEP_PASS: start=0x0200 bytes=64 selector=0x%02x last=0x%02x\n",
+			 otp[0], otp[ARRAY_SIZE(otp) - 1]);
 	}
 
 	if (mt76_is_sdio(&dev->mt76)) {
