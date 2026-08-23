@@ -9,6 +9,7 @@
 #include "mt76_connac.h"
 
 #define MT7932_TX_BOUNCE_STRIDE	16384
+#define MT7932_TX_MCU_HW_RING	17
 
 static struct mt76_txwi_cache *
 mt76_alloc_txwi(struct mt76_dev *dev)
@@ -647,7 +648,11 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 		/* The ring-space check above guarantees that the descriptor-indexed
 		 * slot is no longer owned by hardware when head wraps.
 		 */
-		bounce_slot = READ_ONCE(q->head);
+		if (mt76_chip(dev) == 0x7932 &&
+		    q->hw_idx == MT7932_TX_MCU_HW_RING)
+			bounce_slot = 0;
+		else
+			bounce_slot = READ_ONCE(q->head);
 		if (bounce_slot >= q->tx_bounce_entries)
 			goto error;
 		bounce = (u8 *)q->tx_bounce_buf +
@@ -657,8 +662,11 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 		buf.skip_unmap = true;
 		if (!q->tx_bounce_logged) {
 			dev_info(dev->dev,
-				 "J700_MT7932_TX_BOUNCE_ACTIVE: hw=%u stride=%u\n",
-				 q->hw_idx, q->tx_bounce_stride);
+				 "J700_MT7932_TX_BOUNCE_ACTIVE: hw=%u stride=%u mode=%s\n",
+				 q->hw_idx, q->tx_bounce_stride,
+				 mt76_chip(dev) == 0x7932 &&
+				 q->hw_idx == MT7932_TX_MCU_HW_RING ?
+				 "fixed-warm-slot0" : "descriptor-indexed");
 			q->tx_bounce_logged = true;
 		}
 	} else {
