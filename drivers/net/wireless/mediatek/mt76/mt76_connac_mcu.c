@@ -3392,8 +3392,14 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 	txd_len = cmd & __MCU_CMD_FIELD_UNI ? sizeof(*uni_txd) : sizeof(*mcu_txd);
 	txd = (__le32 *)skb_push(skb, txd_len);
 
+	/* AppleSunriseWLAN 25G83's asicConnac2xFillInitCmdTxd selects
+	 * MT_TX_TYPE_FW (format 3) whenever the init CID is nonzero.  All MT7932
+	 * commands reaching this header path have a nonzero CID; raw scatter has
+	 * no header and exits above.
+	 */
 	val = FIELD_PREP(MT_TXD0_TX_BYTES, skb->len) |
-	      FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD);
+	      FIELD_PREP(MT_TXD0_PKT_FMT,
+			 mt7932 ? MT_TX_TYPE_FW : MT_TX_TYPE_CMD);
 	if (!mt7932)
 		val |= FIELD_PREP(MT_TXD0_Q_IDX, MT_TX_MCU_PORT_RX_Q0);
 	txd[0] = cpu_to_le32(val);
