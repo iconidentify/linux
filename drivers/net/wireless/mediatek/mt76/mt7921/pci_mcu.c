@@ -10,43 +10,6 @@
 #include "mcu.h"
 
 static void
-mt7932_dma_local_trace(struct mt792x_dev *dev)
-{
-	dev_info(dev->mt76.dev,
-		 "J700_MT7932_WFDMA_LOCAL: busy=%08x err=%08x pause=%08x/%08x timeout=%08x misc=%08x glo2=%08x info=%08x/%08x txdbg=%08x/%08x ext=%08x/%08x dbg=%08x/%08x hifdbg=%08x/%08x\n",
-		 mt76_rr(dev, MT_WFDMA0(0x138)),
-		 mt76_rr(dev, MT_WFDMA0(0x1e8)),
-		 mt76_rr(dev, MT_WFDMA0(0x220)),
-		 mt76_rr(dev, MT_WFDMA0(0x224)),
-		 mt76_rr(dev, MT_WFDMA0(0x230)),
-		 mt76_rr(dev, MT_WFDMA0(0x234)),
-		 mt76_rr(dev, MT_WFDMA0(0x25c)),
-		 mt76_rr(dev, MT_WFDMA0(0x284)),
-		 mt76_rr(dev, MT_WFDMA0(0x288)),
-		 mt76_rr(dev, MT_WFDMA0(0x2a0)),
-		 mt76_rr(dev, MT_WFDMA0(0x2a4)),
-		 mt76_rr(dev, MT_WFDMA0(0x2b4)),
-		 mt76_rr(dev, MT_WFDMA0(0x2b8)),
-		 mt76_rr(dev, MT_WFDMA0(0x124)),
-		 mt76_rr(dev, MT_WFDMA0(0x128)),
-		 mt76_rr(dev, MT_WFDMA0(0x12c)),
-		 mt76_rr(dev, MT_WFDMA0(0x130)));
-	dev_info(dev->mt76.dev,
-		 "J700_MT7932_DMASHDL_LOCAL: optional=%08x signal=%08x dbg=%08x/%08x/%08x long=%08x error=%08x status=%08x/%08x group0=%08x pkt0=%08x\n",
-		 mt76_rr(dev, MT_DMA_SHDL(0x008)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x018)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x0c0)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x0c4)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x0c8)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x0d4)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x0dc)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x100)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x110)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x140)),
-		 mt76_rr(dev, MT_DMA_SHDL(0x180)));
-}
-
-static void
 mt7932_dma_path_trace(struct mt792x_dev *dev, struct mt76_queue *q,
 		      struct mt76_desc *desc)
 {
@@ -137,13 +100,13 @@ mt7932_mcu_ring_trace(struct mt792x_dev *dev, struct mt76_queue *q,
 		 le32_to_cpu(READ_ONCE(desc->ctrl)),
 		 le32_to_cpu(READ_ONCE(desc->buf1)),
 		 le32_to_cpu(READ_ONCE(desc->info)));
-	/* The direct platform snapshot is safe only during first contact.  Once
-	 * patch-finish changes firmware ownership, the same DART window can gate.
+	/* Cycle126 executed this read-only platform snapshot with head == 2: one
+	 * earlier MCU command occupied slot zero and the patch semaphore occupied
+	 * slot one.  Preserve that exact first-contact boundary; head == 1 skips
+	 * the snapshot, while any later access can race changed firmware ownership.
 	 */
-	if (!strcmp(phase, "after-10ms") && q->head == 1) {
-		mt7932_dma_local_trace(dev);
+	if (!strcmp(phase, "after-10ms") && q->head == 2)
 		mt7932_dma_path_trace(dev, q, desc);
-	}
 }
 
 static void
