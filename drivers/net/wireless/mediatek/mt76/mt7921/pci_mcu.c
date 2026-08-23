@@ -169,6 +169,26 @@ mt7921_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 		usleep_range(10000, 11000);
 		mt7932_mcu_ring_trace(dev, q, "after-10ms");
 	}
+	if (is_mt7932(mdev) && cmd != MCU_CMD(FW_SCATTER) && !ret) {
+		int i;
+
+		for (i = 0; i < 1000; i++) {
+			mdev->queue_ops->tx_cleanup(mdev, q, false);
+			if (!READ_ONCE(q->queued))
+				break;
+			usleep_range(50, 100);
+		}
+		if (i == 1000) {
+			dev_err(mdev->dev,
+				"J700_MT7932_CMD_RING_DRAIN_FAIL: hw=%u head=%u tail=%u queued=%d\n",
+				q->hw_idx, q->head, q->tail, q->queued);
+			return -ETIMEDOUT;
+		}
+		if (q->head == 0)
+			dev_info(mdev->dev,
+				 "J700_MT7932_CMD_RING_WRAP_PASS: hw=%u head=%u tail=%u queued=%d\n",
+				 q->hw_idx, q->head, q->tail, q->queued);
+	}
 
 	return ret;
 }
