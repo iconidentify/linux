@@ -36,6 +36,15 @@ void mt792x_irq_tasklet(unsigned long data)
 	intr = mt76_rr(dev, MT_WFDMA0_HOST_INT_STA);
 	intr &= dev->mt76.mmio.irqmask;
 	mt76_wr(dev, MT_WFDMA0_HOST_INT_STA, intr);
+	if (is_mt7932(&dev->mt76) &&
+	    READ_ONCE(dev->mt76.mcu.msg_seq) >= 77) {
+		struct mt76_queue *rx = &dev->mt76.q_rx[MT_RXQ_MCU];
+
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_FW_START_IRQ: intr=%08x mask=%08x rx=%u/%u/%d\n",
+			 intr, dev->mt76.mmio.irqmask,
+			 rx->head, rx->tail, rx->queued);
+	}
 
 	trace_dev_irq(&dev->mt76, intr, dev->mt76.mmio.irqmask);
 
@@ -49,6 +58,11 @@ void mt792x_irq_tasklet(unsigned long data)
 		u32 intr_sw;
 
 		intr_sw = mt76_rr(dev, MT_MCU_CMD);
+		if (is_mt7932(&dev->mt76) &&
+		    READ_ONCE(dev->mt76.mcu.msg_seq) >= 77)
+			dev_info(dev->mt76.dev,
+				 "J700_MT7932_FW_START_SW_IRQ: value=%08x\n",
+				 intr_sw);
 		/* ack MCU2HOST_SW_INT_STA */
 		mt76_wr(dev, MT_MCU_CMD, intr_sw);
 		if (intr_sw & MT_MCU_CMD_WAKE_RX_PCIE) {
