@@ -244,6 +244,36 @@ struct apple_dart {
 	u64 *locked_ttbr[DART_MAX_STREAMS][DART_MAX_TTBR];
 };
 
+static struct apple_dart *apple_dart_apcie_serror;
+
+void apple_dart_dump_apcie_serror(void);
+void apple_dart_dump_apcie_serror(void)
+{
+	struct apple_dart *dart = READ_ONCE(apple_dart_apcie_serror);
+	u32 error, mask, addr_lo, addr_hi, streams, enable;
+
+	if (!dart)
+		return;
+
+	error = readl(dart->regs + DART_T8110_ERROR);
+	mask = readl(dart->regs + DART_T8110_ERROR_MASK);
+	addr_lo = readl(dart->regs + DART_T8110_ERROR_ADDR_LO);
+	addr_hi = readl(dart->regs + DART_T8110_ERROR_ADDR_HI);
+	streams = readl(dart->regs + DART_T8110_ERROR_STREAMS);
+	enable = readl(dart->regs + DART_T8110_ENABLE_STREAMS);
+
+	pr_emerg("J700_APCIE_DART_SERROR: error=%08x mask=%08x addr=%08x/%08x streams=%08x enable=%08x tcr0=%08x ttbr0=%08x tcr16=%08x ttbr16=%08x tcr17=%08x ttbr17=%08x tcr18=%08x ttbr18=%08x\n",
+		 error, mask, addr_hi, addr_lo, streams, enable,
+		 readl(dart->regs + DART_TCR(dart, 0)),
+		 readl(dart->regs + DART_TTBR(dart, 0, 0)),
+		 readl(dart->regs + DART_TCR(dart, 16)),
+		 readl(dart->regs + DART_TTBR(dart, 16, 0)),
+		 readl(dart->regs + DART_TCR(dart, 17)),
+		 readl(dart->regs + DART_TTBR(dart, 17, 0)),
+		 readl(dart->regs + DART_TCR(dart, 18)),
+		 readl(dart->regs + DART_TTBR(dart, 18, 0)));
+}
+
 /*
  * Convenience struct to identify streams.
  *
@@ -1463,6 +1493,8 @@ static int apple_dart_probe(struct platform_device *pdev)
 		"DART [pagesize %x, %d streams, bypass support: %d, bypass forced: %d, locked: %d, AS %d -> %d] initialized\n",
 		dart->pgsize, dart->num_streams, dart->supports_bypass,
 		dart->pgsize > PAGE_SIZE, dart->locked, dart->ias, dart->oas);
+	if (res->start == 0x390000000ULL)
+		WRITE_ONCE(apple_dart_apcie_serror, dart);
 	return 0;
 
 err_sysfs_remove:
@@ -1479,6 +1511,9 @@ err_clk_disable:
 static void apple_dart_remove(struct platform_device *pdev)
 {
 	struct apple_dart *dart = platform_get_drvdata(pdev);
+
+	if (READ_ONCE(apple_dart_apcie_serror) == dart)
+		WRITE_ONCE(apple_dart_apcie_serror, NULL);
 
 	if (!dart->locked)
 		apple_dart_hw_reset(dart);
