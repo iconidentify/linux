@@ -111,8 +111,21 @@ mt7932_mcu_ring_trace(struct mt792x_dev *dev, struct mt76_queue *q,
 
 int mt7921e_driver_own(struct mt792x_dev *dev)
 {
-	u32 reg = mt7921_reg_map_l1(dev, MT_TOP_LPCR_HOST_BAND0);
+	u32 reg;
+	int ret;
 
+	if (is_mt7932(&dev->mt76)) {
+		ret = __mt792xe_mcu_drv_pmctrl(dev);
+		if (!ret)
+			dev_info(dev->mt76.dev,
+				 "J700_MT7932_DRIVER_OWN_PASS: register=0x%08x request=0x%08x sync_mask=0x%08x source=apple-connac2\n",
+				 MT_CONN_ON_LPCTL,
+				 (u32)PCIE_LPCR_HOST_CLR_OWN,
+				 (u32)PCIE_LPCR_HOST_OWN_SYNC);
+		return ret;
+	}
+
+	reg = mt7921_reg_map_l1(dev, MT_TOP_LPCR_HOST_BAND0);
 	mt76_wr(dev, reg, MT_TOP_LPCR_HOST_DRV_OWN);
 	if (!mt76_poll_msec(dev, reg, MT_TOP_LPCR_HOST_FW_OWN,
 			    0, 500)) {
@@ -177,13 +190,6 @@ int mt7921e_mcu_init(struct mt792x_dev *dev)
 		return err;
 
 	mt76_rmw_field(dev, MT_PCIE_MAC_PM, MT_PCIE_MAC_PM_L0S_DIS, 1);
-	if (is_mt7932(&dev->mt76)) {
-		dev_info(dev->mt76.dev,
-			 "J700_MT7932_OWNED_QUIESCE_BEGIN: delay_ms=4000\n");
-		msleep(4000);
-		dev_info(dev->mt76.dev,
-			 "J700_MT7932_OWNED_QUIESCE_END: delay_ms=4000\n");
-	}
 
 	err = mt7921_run_firmware(dev);
 	cleanup_q = is_mt7932(&dev->mt76) ? dev->mphy.q_tx[MT_TXQ_BE] :
