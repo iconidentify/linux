@@ -69,15 +69,16 @@ int mt76_connac_mcu_read_otp(struct mt76_dev *dev, u32 addr, u8 *value)
 					&req, sizeof(req), true, &skb);
 	if (ret)
 		return ret;
-	if (skb->len < 5) {
+	if (skb->len < 4) {
 		ret = -EPROTO;
 		goto out;
 	}
 
-	*value = skb->data[4];
+	*value = skb->data[0];
 	dev_info(dev->dev,
-		 "J700_MT7932_OTP_READ_PASS: addr=0x%04x value=0x%02x response_len=%u\n",
-		 addr, *value, skb->len);
+		 "J700_MT7932_OTP_READ_PASS: addr=0x%04x value=0x%02x response=%02x/%02x/%02x/%02x len=%u\n",
+		 addr, *value, skb->data[0], skb->data[1],
+		 skb->data[2], skb->data[3], skb->len);
 out:
 	dev_kfree_skb(skb);
 
