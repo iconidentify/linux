@@ -190,13 +190,16 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
 			   MT_WFDMA0_GLO_CFG_RX_WB_DDONE;
 	mt76_rmw(dev, MT_WFDMA0_GLO_CFG, cfg_mask, cfg_set);
 
-	/* mt792x_dma_disable() clears the TX-DMASHDL selector.  Apple's
-	 * MT7932 path preserves the reset-time selector while programming the
-	 * DMASHDL image, so restore it before either DMA engine is enabled.
+	/* Cycle129 consumed ring-zero descriptors with the TX-DMASHDL selector
+	 * clear.  Keep that state as the bounded A/B control while retaining the
+	 * complete scheduler image for read-only comparison.
 	 */
-	if (is_mt7932(&dev->mt76))
-		mt76_set(dev, MT_WFDMA0_GLO_CFG_EXT0,
-			 MT_WFDMA0_CSR_TX_DMASHDL_ENABLE);
+	if (is_mt7932(&dev->mt76)) {
+		mt76_clear(dev, MT_WFDMA0_GLO_CFG_EXT0,
+			   MT_WFDMA0_CSR_TX_DMASHDL_ENABLE);
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_DMASHDL_SELECTOR_CONTROL: enabled=0 mode=round-robin cycle129-parity=1\n");
+	}
 
 	mt76_set(dev, MT_WFDMA0_GLO_CFG,
 		 MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
@@ -215,8 +218,8 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
 		    mt76_rr(dev, MT_WFDMA0_INT_RX_PRI) != 0x0000000c ||
 		    mt76_rr(dev, MT7932_WFDMA_EXT_CSR_3038) != 0x00000013 ||
 		    mt76_rr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0) != 0x8032800a ||
-		    !(mt76_rr(dev, MT_WFDMA0_GLO_CFG_EXT0) &
-		      MT_WFDMA0_CSR_TX_DMASHDL_ENABLE))
+		    (mt76_rr(dev, MT_WFDMA0_GLO_CFG_EXT0) &
+		     MT_WFDMA0_CSR_TX_DMASHDL_ENABLE))
 			return -EIO;
 		dev_info(dev->mt76.dev,
 			 "J700_MT7932_WFDMA_APPLE_CFG_PASS: glo=0x%08x rxpri=0x%08x ext3038=0x%08x dly=0x%08x\n",
