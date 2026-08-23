@@ -52,6 +52,26 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 				 "J700_MT7932_PATCH_FINISH_ACCEPT: status=1 apple_semantics=success\n");
 			ret = 0;
 		}
+	} else if (is_mt7932(mdev) &&
+		   (cmd == MCU_CMD(TARGET_ADDRESS_LEN_REQ) ||
+		    cmd == MCU_CMD(PATCH_START_REQ) ||
+		    cmd == MCU_CMD(FW_START_REQ))) {
+		u8 response_cid;
+
+		/* MT7932 init events have a 32-byte RXD/event header followed by
+		 * INIT_EVENT_CMD_RESULT.  The final four bytes represented as ext_eid
+		 * by the normal connac2 RXD are the status, CID and two reserved bytes.
+		 */
+		skb_pull(skb, sizeof(*rxd) - 4);
+		if (skb->len < 4)
+			return -EPROTO;
+		ret = skb->data[0];
+		response_cid = skb->data[1];
+		dev_info(mdev->dev,
+			 "J700_MT7932_INIT_CMD_RESULT: eid=%u seq=%u cid=0x%02x expected=0x%02x status=%d\n",
+			 rxd->eid, rxd->seq, response_cid, mcu_cmd, ret);
+		if (rxd->eid != 1 || response_cid != mcu_cmd)
+			ret = -EPROTO;
 	} else if (cmd == MCU_EXT_CMD(THERMAL_CTRL)) {
 		skb_pull(skb, sizeof(*rxd) + 4);
 		ret = le32_to_cpu(*(__le32 *)skb->data);
