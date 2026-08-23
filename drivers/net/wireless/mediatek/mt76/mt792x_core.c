@@ -64,6 +64,63 @@ static int mt7932_mcu_share_info_init(struct mt792x_dev *dev)
 	return 0;
 }
 
+static void mt7932_mcu_share_buffer_trace(struct mt792x_dev *dev,
+					  const char *phase)
+{
+	const __le32 *buffers[] = {
+		dev->mt7932_ipc_buf,
+		dev->mt7932_aux_buf,
+	};
+	const u32 sizes[] = {
+		MT7932_MCU_SHARE_IPC_SIZE,
+		MT7932_MCU_SHARE_AUX_SIZE,
+	};
+	const char * const names[] = { "ipc", "aux" };
+	u32 enable, flags, size, ipc_addr, aux_addr;
+	unsigned int b;
+
+	/* These allocations are coherent.  Order the CPU observations after the
+	 * device's last opportunity to publish its firmware-start handshake.
+	 */
+	dma_rmb();
+	for (b = 0; b < ARRAY_SIZE(buffers); b++) {
+		u32 first_offset = U32_MAX, first_value = 0;
+		u32 last_offset = U32_MAX, last_value = 0;
+		u32 nonzero = 0, xor = 0, sum = 0;
+		u32 i;
+
+		for (i = 0; i < sizes[b] / sizeof(*buffers[b]); i++) {
+			u32 value = le32_to_cpu(READ_ONCE(buffers[b][i]));
+
+			xor ^= value;
+			sum += value;
+			if (!value)
+				continue;
+			if (first_offset == U32_MAX) {
+				first_offset = i * sizeof(*buffers[b]);
+				first_value = value;
+			}
+			last_offset = i * sizeof(*buffers[b]);
+			last_value = value;
+			nonzero++;
+		}
+
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_MCU_SHARE_BUFFER: phase=%s name=%s bytes=0x%x nonzero=%u first=0x%08x:0x%08x last=0x%08x:0x%08x xor=0x%08x sum=0x%08x\n",
+			 phase, names[b], sizes[b], nonzero, first_offset,
+			 first_value, last_offset, last_value, xor, sum);
+	}
+
+	enable = mt76_rr(dev, MT7932_MCU_SHARE_ENABLE);
+	flags = mt76_rr(dev, MT7932_MCU_SHARE_FLAGS);
+	size = mt76_rr(dev, MT7932_MCU_SHARE_SIZE);
+	ipc_addr = mt76_rr(dev, MT7932_MCU_SHARE_IPC_ADDR);
+	aux_addr = mt76_rr(dev, MT7932_MCU_SHARE_AUX_ADDR);
+	dev_info(dev->mt76.dev,
+		 "J700_MT7932_MCU_SHARE_REGS: phase=%s enable=0x%08x flags=0x%08x size=0x%08x ipc=0x%08x aux=0x%08x\n",
+		 phase, enable, flags, size, ipc_addr, aux_addr);
+}
+
 static const struct ieee80211_iface_limit if_limits[] = {
 	{
 		.max = MT792x_MAX_INTERFACES,
@@ -1067,10 +1124,12 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 			 mt792x_ram_name(dev));
 	ret = mt76_connac2_load_ram(&dev->mt76, mt792x_ram_name(dev), NULL);
 	if (ret) {
-		if (mt7932)
+		if (mt7932) {
+			mt7932_mcu_share_buffer_trace(dev, "ram-upload-fail");
 			dev_err(dev->mt76.dev,
 				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=ram-upload ret=%d\n",
 				ret);
+		}
 		return ret;
 	}
 	if (mt7932)
