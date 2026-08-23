@@ -55,6 +55,36 @@ int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option)
 }
 EXPORT_SYMBOL_GPL(mt76_connac_mcu_start_firmware);
 
+int mt76_connac_mcu_read_otp(struct mt76_dev *dev, u32 addr, u8 *value)
+{
+	struct {
+		__le32 addr;
+	} req = {
+		.addr = cpu_to_le32(addr),
+	};
+	struct sk_buff *skb;
+	int ret;
+
+	ret = mt76_mcu_send_and_get_msg(dev, MCU_CMD(EFUSE_ACCESS),
+					&req, sizeof(req), true, &skb);
+	if (ret)
+		return ret;
+	if (skb->len < 5) {
+		ret = -EPROTO;
+		goto out;
+	}
+
+	*value = skb->data[4];
+	dev_info(dev->dev,
+		 "J700_MT7932_OTP_READ_PASS: addr=0x%04x value=0x%02x response_len=%u\n",
+		 addr, *value, skb->len);
+out:
+	dev_kfree_skb(skb);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt76_connac_mcu_read_otp);
+
 int mt76_connac_mcu_patch_sem_ctrl(struct mt76_dev *dev, bool get)
 {
 	u32 op = get ? (is_mt7932(dev) ? PATCH_SEM_GET_MT7932 :
@@ -3367,6 +3397,7 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 		mcu_txd->s2d_index = MCU_S2D_H2N;
 
 	if (mt7932 && (cmd == MCU_CMD(PATCH_SEM_CONTROL) ||
+		       cmd == MCU_CMD(EFUSE_ACCESS) ||
 		       cmd == MCU_CMD(FW_START_REQ)))
 		dev_info(dev->dev,
 			 "J700_MT7932_INIT_TXD: cmd=0x%02x txd0=0x%08x txd1=0x%08x pq_id=0x%04x len=%u cid=0x%02x pkt=%u query=%u seq=%u s2d=%u\n",

@@ -1332,6 +1332,7 @@ enum {
 	MCU_CMD_PATCH_START_REQ = 0x05,
 	MCU_CMD_PATCH_FINISH_REQ = 0x07,
 	MCU_CMD_PATCH_SEM_CONTROL = 0x10,
+	MCU_CMD_EFUSE_ACCESS = 0x50,
 	MCU_CMD_WA_PARAM = 0xc4,
 	MCU_CMD_ONE_TIME_CAL = 0xd6,
 	MCU_CMD_EXT_CID = 0xed,
@@ -1998,6 +1999,7 @@ int mt76_connac_mcu_init_download(struct mt76_dev *dev, u32 addr, u32 len,
 int mt76_connac_mcu_start_patch(struct mt76_dev *dev);
 int mt76_connac_mcu_patch_sem_ctrl(struct mt76_dev *dev, bool get);
 int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option);
+int mt76_connac_mcu_read_otp(struct mt76_dev *dev, u32 addr, u8 *value);
 
 void mt76_connac_mcu_build_rnr_scan_param(struct mt76_dev *mdev,
 					  struct cfg80211_scan_request *sreq);

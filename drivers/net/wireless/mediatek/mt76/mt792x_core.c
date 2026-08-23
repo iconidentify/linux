@@ -926,6 +926,7 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 {
 	int ret;
 	bool mt7932 = is_mt7932(&dev->mt76);
+	u8 otp = 0;
 
 	mt76_connac_mcu_restart(&dev->mt76);
 
@@ -948,6 +949,15 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 	}
 	if (mt7932)
 		dev_info(dev->mt76.dev, "J700_MT7932_PATCH_UPLOAD_PASS\n");
+	if (mt7932) {
+		ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x200, &otp);
+		if (ret) {
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=otp-read ret=%d\n",
+				ret);
+			return ret;
+		}
+	}
 
 	if (mt76_is_sdio(&dev->mt76)) {
 		/* activate again */
