@@ -168,23 +168,6 @@ mt7921_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 		txq = MT_MCUQ_FWDL;
 	q = mdev->q_mcu[txq];
 
-	/* Cycle126 completed patch and RAM transfer over Linux's WM/FWDL rings.
-	 * Re-establish that hardware-proven route before changing the FW_START
-	 * transaction which remained unanswered there.
-	 */
-	if (is_mt7932(mdev) &&
-	    (cmd == MCU_CMD(PATCH_SEM_CONTROL) ||
-	     cmd == MCU_CMD(TARGET_ADDRESS_LEN_REQ) ||
-	     cmd == MCU_CMD(PATCH_START_REQ) ||
-	     cmd == MCU_CMD(PATCH_FINISH_REQ) ||
-	     cmd == MCU_CMD(FW_SCATTER) ||
-	     cmd == MCU_CMD(FW_START_REQ))) {
-		if (cmd != MCU_CMD(FW_SCATTER) || q->head < 16)
-			dev_info(mdev->dev,
-				 "J700_MT7932_CYCLE126_ROUTE: cmd=0x%08x hw=%u\n",
-				 cmd, q->hw_idx);
-	}
-
 	if (is_mt7932(mdev) && cmd == MCU_CMD(PATCH_SEM_CONTROL) &&
 	    q->head < 3)
 		trace_first_contact = true;
