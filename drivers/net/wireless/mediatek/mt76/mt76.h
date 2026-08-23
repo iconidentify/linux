@@ -244,6 +244,7 @@ struct mt76_queue {
 	dma_addr_t tx_bounce_dma;
 	u32 tx_bounce_stride;
 	u32 tx_bounce_entries;
+	u32 tx_bounce_next;
 
 	u16 first;
 	u16 head;

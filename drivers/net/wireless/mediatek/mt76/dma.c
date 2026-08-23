@@ -642,12 +642,15 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 		if (skb->len > q->tx_bounce_stride)
 			goto error;
 
-		/* The ring-space check above guarantees that the descriptor-indexed
-		 * slot is no longer owned by hardware when head wraps.
+		/* Cycle126 assigned each MCU command a fresh coherent slot for the
+		 * entire firmware-download lifetime.  Descriptor cleanup retires the
+		 * ring entry, but does not prove the device has stopped observing the
+		 * payload through its internal pipeline.
 		 */
-		bounce_slot = READ_ONCE(q->head);
+		bounce_slot = READ_ONCE(q->tx_bounce_next);
 		if (bounce_slot >= q->tx_bounce_entries)
 			goto error;
+		WRITE_ONCE(q->tx_bounce_next, bounce_slot + 1);
 		bounce = (u8 *)q->tx_bounce_buf +
 			 bounce_slot * q->tx_bounce_stride;
 		memcpy(bounce, skb->data, skb->len);
