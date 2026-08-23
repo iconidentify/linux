@@ -10,7 +10,8 @@
 
 #define MT7932_MCU_BOUNCE_STRIDE	8192
 #define MT7932_MCU_WM_BOUNCE_ENTRIES	64
-#define MT7932_MCU_FWDL_BOUNCE_ENTRIES	512
+/* 25G83 needs 17 patch plus 583 RAM scatter payloads at 2 KiB. */
+#define MT7932_MCU_FWDL_BOUNCE_ENTRIES	640
 
 static struct mt76_txwi_cache *
 mt76_alloc_txwi(struct mt76_dev *dev)
