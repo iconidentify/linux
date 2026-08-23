@@ -3249,6 +3249,7 @@ static u32 mt76_connac2_get_data_mode(struct mt76_dev *dev, u32 info)
 int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 {
 	int i, ret, sem, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
+	bool secure_held = false;
 	const struct mt76_connac2_patch_hdr *hdr;
 	const struct firmware *fw = NULL;
 
@@ -3324,12 +3325,27 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 			goto out;
 		}
 	}
+	if (is_mt7932(dev)) {
+		ret = mt7932_sec_protect_fwdl(dev, true);
+		if (ret)
+			goto out;
+		secure_held = true;
+	}
 
 	ret = mt76_connac_mcu_start_patch(dev);
 	if (ret)
 		dev_err(dev->dev, "Failed to start patch\n");
+	if (secure_held) {
+		int release_ret = mt7932_sec_protect_fwdl(dev, false);
+
+		secure_held = false;
+		if (!ret)
+			ret = release_ret;
+	}
 
 out:
+	if (secure_held)
+		mt7932_sec_protect_fwdl(dev, false);
 	sem = mt76_connac_mcu_patch_sem_ctrl(dev, false);
 	switch (sem) {
 	case PATCH_REL_SEM_SUCCESS:
