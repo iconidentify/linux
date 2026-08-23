@@ -3337,8 +3337,12 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 		else
 			mcu_txd->set_query = MCU_Q_SET;
 		mcu_txd->ext_cid_ack = !!mcu_txd->ext_cid;
-	} else if (mt7932 && mcu_cmd == MCU_CMD_ONE_TIME_CAL) {
-		mcu_txd->set_query = MCU_Q_SET;
+	} else if (mt7932) {
+		/* AppleSunriseWLAN's init-header builder leaves this byte zero;
+		 * only the later one-time-calibration command requests SET.
+		 */
+		if (mcu_cmd == MCU_CMD_ONE_TIME_CAL)
+			mcu_txd->set_query = MCU_Q_SET;
 	} else {
 		mcu_txd->set_query = MCU_Q_NA;
 	}
