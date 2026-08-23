@@ -500,11 +500,18 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 			 "J700_MT7932_FIRMWARE_GATE_BEGIN: chipid=0x%04x revision=0x%08x\n",
 			 chipid, mdev->rev);
 
-	ret = mt792x_wfsys_reset(dev);
-	if (ret)
-		goto err_free_dev;
-	if (id->device == 0x7932)
-		dev_info(mdev->dev, "J700_MT7932_WFSYS_RESET_PASS\n");
+	if (id->device == 0x7932) {
+		/* AppleSunriseWLAN's normal start takes driver ownership and enters
+		 * nicInitializeAdapter without pulsing WFSYS_SW_RST_B.  Preserve the
+		 * fresh iBoot state while reconstructing its firmware-download path.
+		 */
+		dev_info(mdev->dev,
+			 "J700_MT7932_WFSYS_PRESERVE_PASS: source=iboot reset=skipped\n");
+	} else {
+		ret = mt792x_wfsys_reset(dev);
+		if (ret)
+			goto err_free_dev;
+	}
 
 	mt76_wr(dev, irq_map.host_irq_enable, 0);
 
