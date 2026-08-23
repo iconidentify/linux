@@ -69,8 +69,14 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 		dev_info(mdev->dev,
 			 "J700_MT7932_INIT_CMD_RESULT: eid=%u seq=%u cid=0x%02x expected=0x%02x status=%d\n",
 			 rxd->eid, rxd->seq, response_cid, mcu_cmd, ret);
-		if (rxd->eid != 1 || response_cid != mcu_cmd)
+		if (cmd == MCU_CMD(TARGET_ADDRESS_LEN_REQ) && rxd->eid == 1 &&
+		    ret == 1 && response_cid == 0) {
+			dev_info(mdev->dev,
+				 "J700_MT7932_DOWNLOAD_CONFIG_ACCEPT: status=1 cid=0 apple_semantics=success\n");
+			ret = 0;
+		} else if (rxd->eid != 1 || response_cid != mcu_cmd) {
 			ret = -EPROTO;
+		}
 	} else if (cmd == MCU_EXT_CMD(THERMAL_CTRL)) {
 		skb_pull(skb, sizeof(*rxd) + 4);
 		ret = le32_to_cpu(*(__le32 *)skb->data);
