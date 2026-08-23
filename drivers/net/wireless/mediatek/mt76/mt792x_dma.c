@@ -166,8 +166,7 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
 		mt76_wr(dev, MT_WFDMA0_RST_DRX_PTR, ~0);
 
 	/* configure delay interrupt */
-	if (!is_mt7932(&dev->mt76))
-		mt76_wr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0, 0);
+	mt76_wr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0, 0);
 
 	cfg_mask = MT_WFDMA0_GLO_CFG_TX_WB_DDONE |
 		   MT_WFDMA0_GLO_CFG_FIFO_LITTLE_ENDIAN |
@@ -190,44 +189,23 @@ int mt792x_dma_enable(struct mt792x_dev *dev)
 			   MT_WFDMA0_GLO_CFG_RX_WB_DDONE;
 	mt76_rmw(dev, MT_WFDMA0_GLO_CFG, cfg_mask, cfg_set);
 
-	/* Cycle129 consumed ring-zero descriptors with the TX-DMASHDL selector
-	 * clear.  Keep that state as the bounded A/B control while retaining the
-	 * complete scheduler image for read-only comparison.
+	/* Cycle126 completed patch and RAM transfer with the generic round-robin
+	 * selector.  Keep that hardware-proven state until the reconstructed
+	 * DMASHDL path can advance an equivalent command.
 	 */
 	if (is_mt7932(&dev->mt76)) {
 		mt76_clear(dev, MT_WFDMA0_GLO_CFG_EXT0,
 			   MT_WFDMA0_CSR_TX_DMASHDL_ENABLE);
 		dev_info(dev->mt76.dev,
-			 "J700_MT7932_DMASHDL_SELECTOR_CONTROL: enabled=0 mode=round-robin cycle129-parity=1\n");
+			 "J700_MT7932_CYCLE126_TRANSPORT: dmashdl_selector=0 mode=round-robin\n");
 	}
 
 	mt76_set(dev, MT_WFDMA0_GLO_CFG,
 		 MT_WFDMA0_GLO_CFG_TX_DMA_EN | MT_WFDMA0_GLO_CFG_RX_DMA_EN);
-	if (is_mt7932(&dev->mt76)) {
-		/* Exact enable-time writes from AppleSunriseWLAN 25G83
-		 * _mt7922WpdmaConfig after the common WFDMA control call.
-		 */
-		mt76_wr(dev, MT_WFDMA0_INT_RX_PRI, 0x0000000c);
-		mt76_wr(dev, MT7932_WFDMA_EXT_CSR_3038, 0x00000013);
-		mt76_wr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0, 0x8032800a);
-		if ((mt76_rr(dev, MT_WFDMA0_GLO_CFG) &
-		     (cfg_mask | MT_WFDMA0_GLO_CFG_TX_DMA_EN |
-		      MT_WFDMA0_GLO_CFG_RX_DMA_EN)) !=
-		    (cfg_set | MT_WFDMA0_GLO_CFG_TX_DMA_EN |
-		     MT_WFDMA0_GLO_CFG_RX_DMA_EN) ||
-		    mt76_rr(dev, MT_WFDMA0_INT_RX_PRI) != 0x0000000c ||
-		    mt76_rr(dev, MT7932_WFDMA_EXT_CSR_3038) != 0x00000013 ||
-		    mt76_rr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0) != 0x8032800a ||
-		    (mt76_rr(dev, MT_WFDMA0_GLO_CFG_EXT0) &
-		     MT_WFDMA0_CSR_TX_DMASHDL_ENABLE))
-			return -EIO;
+	if (is_mt7932(&dev->mt76))
 		dev_info(dev->mt76.dev,
-			 "J700_MT7932_WFDMA_APPLE_CFG_PASS: glo=0x%08x rxpri=0x%08x ext3038=0x%08x dly=0x%08x\n",
-			 mt76_rr(dev, MT_WFDMA0_GLO_CFG),
-			 mt76_rr(dev, MT_WFDMA0_INT_RX_PRI),
-			 mt76_rr(dev, MT7932_WFDMA_EXT_CSR_3038),
-			 mt76_rr(dev, MT_WFDMA0_PRI_DLY_INT_CFG0));
-	}
+			 "J700_MT7932_WFDMA_GLO_CFG_PASS: value=0x%08x apple_mask=0x50209045\n",
+			 mt76_rr(dev, MT_WFDMA0_GLO_CFG));
 
 	if (is_mt7925(&dev->mt76)) {
 		mt76_rmw(dev, MT_UWFDMA0_GLO_CFG_EXT1, BIT(28), BIT(28));

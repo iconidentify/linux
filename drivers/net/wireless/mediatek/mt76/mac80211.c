@@ -613,7 +613,7 @@ void mt76_unregister_phy(struct mt76_phy *phy)
 }
 EXPORT_SYMBOL_GPL(mt76_unregister_phy);
 
-static int mt76_page_pool_prewarm(struct mt76_queue *q, int count)
+static int __maybe_unused mt76_page_pool_prewarm(struct mt76_queue *q, int count)
 {
 	struct page **page;
 	int i, ret = 0;
@@ -696,16 +696,6 @@ int mt76_create_page_pool(struct mt76_dev *dev, struct mt76_queue *q)
 		q->page_pool = NULL;
 		return err;
 	}
-	if (mt76_chip(dev) == 0x7932 && mt76_is_mmio(dev)) {
-		int err = mt76_page_pool_prewarm(q, pp_params.pool_size);
-
-		if (err) {
-			page_pool_destroy(q->page_pool);
-			q->page_pool = NULL;
-			return err;
-		}
-	}
-
 	return 0;
 }
 EXPORT_SYMBOL_GPL(mt76_create_page_pool);

@@ -169,7 +169,7 @@ static u32 mt7921_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
 	return dev->bus_ops->rmw(mdev, addr, mask, val);
 }
 
-static int mt7932_dma_sched_init(struct mt792x_dev *dev)
+static int __maybe_unused mt7932_dma_sched_init(struct mt792x_dev *dev)
 {
 	static const u32 quota[16] = {
 		0x02000028, 0x02000028, 0x02000028, 0x02000028,
@@ -267,19 +267,13 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		layout.has_mcu_wa           = false;
 	}
 	if (is_mt7932(&dev->mt76)) {
-		layout.data_tx_ring_size = MT7932_TX_RING_SIZE;
 		layout.mcu_tx_ring_size = MT7932_TX_MCU_RING_SIZE;
 		layout.fwdl_tx_ring_size = MT7932_TX_FWDL_RING_SIZE;
-		layout.data_rx_ring_size = MT7932_RX_RING_SIZE;
 		layout.mcu_rxdone_ring_size = MT7932_RX_MCU_RING_SIZE;
-		layout.mcu_wa_rxdone_ring_size = MT7932_RX_MCU_WA_RING_SIZE;
-		layout.rx_buf_size = MT7932_RX_BUF_SIZE;
 		dev_info(dev->mt76.dev,
-			 "J700_MT7932_DMA_LAYOUT: tx0=%u tx17=%u tx16=%u rx0=%u rx2=%u rx4=%u rxbuf=%u\n",
-			 layout.data_tx_ring_size, layout.mcu_tx_ring_size,
-			 layout.fwdl_tx_ring_size, layout.mcu_rxdone_ring_size,
-			 layout.data_rx_ring_size,
-			 layout.mcu_wa_rxdone_ring_size, layout.rx_buf_size);
+			 "J700_MT7932_DMA_LAYOUT: tx17=%u tx16=%u rx0=%u\n",
+			 layout.mcu_tx_ring_size, layout.fwdl_tx_ring_size,
+			 layout.mcu_rxdone_ring_size);
 	}
 
 	mt76_dma_attach(&dev->mt76);
@@ -287,11 +281,6 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	ret = mt792x_dma_disable(dev, true);
 	if (ret)
 		return ret;
-	if (is_mt7932(&dev->mt76)) {
-		ret = mt7932_dma_sched_init(dev);
-		if (ret)
-			return ret;
-	}
 
 	/* init tx queue */
 	ret = mt76_connac_init_tx_queues(dev->phy.mt76, MT7921_TXQ_BAND0,
@@ -299,17 +288,6 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 					 MT_TX_RING_BASE, NULL, 0);
 	if (ret)
 		return ret;
-	if (is_mt7932(&dev->mt76)) {
-		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
-					       dev->mphy.q_tx[MT_TXQ_BE]);
-		if (ret)
-			return ret;
-		ret = mt76_dma_prealloc_txwi(&dev->mt76,
-					     layout.data_tx_ring_size);
-		if (ret)
-			return ret;
-	}
-
 	mt76_wr(dev, MT_WFDMA0_TX_RING0_EXT_CTRL, 0x4);
 
 	/* command to WM */
@@ -319,7 +297,8 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		return ret;
 	if (is_mt7932(&dev->mt76)) {
 		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
-					       dev->mt76.q_mcu[MT_MCUQ_WM]);
+					       dev->mt76.q_mcu[MT_MCUQ_WM],
+					       64, 8192);
 		if (ret)
 			return ret;
 	}
@@ -331,7 +310,8 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		return ret;
 	if (is_mt7932(&dev->mt76)) {
 		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
-					       dev->mt76.q_mcu[MT_MCUQ_FWDL]);
+					       dev->mt76.q_mcu[MT_MCUQ_FWDL],
+					       512, 8192);
 		if (ret)
 			return ret;
 	}

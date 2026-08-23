@@ -8,9 +8,6 @@
 #include "dma.h"
 #include "mt76_connac.h"
 
-#define MT7932_TX_BOUNCE_STRIDE	16384
-#define MT7932_TX_MCU_HW_RING	17
-
 static struct mt76_txwi_cache *
 mt76_alloc_txwi(struct mt76_dev *dev)
 {
@@ -648,11 +645,7 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 		/* The ring-space check above guarantees that the descriptor-indexed
 		 * slot is no longer owned by hardware when head wraps.
 		 */
-		if (mt76_chip(dev) == 0x7932 &&
-		    q->hw_idx == MT7932_TX_MCU_HW_RING)
-			bounce_slot = 0;
-		else
-			bounce_slot = READ_ONCE(q->head);
+		bounce_slot = READ_ONCE(q->head);
 		if (bounce_slot >= q->tx_bounce_entries)
 			goto error;
 		bounce = (u8 *)q->tx_bounce_buf +
@@ -662,11 +655,8 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 		buf.skip_unmap = true;
 		if (!q->tx_bounce_logged) {
 			dev_info(dev->dev,
-				 "J700_MT7932_TX_BOUNCE_ACTIVE: hw=%u stride=%u mode=%s\n",
-				 q->hw_idx, q->tx_bounce_stride,
-				 mt76_chip(dev) == 0x7932 &&
-				 q->hw_idx == MT7932_TX_MCU_HW_RING ?
-				 "fixed-warm-slot0" : "descriptor-indexed");
+				 "J700_MT7932_MCU_BOUNCE_ACTIVE: hw=%u stride=%u\n",
+				 q->hw_idx, q->tx_bounce_stride);
 			q->tx_bounce_logged = true;
 		}
 	} else {
@@ -691,15 +681,18 @@ error:
 	return -ENOMEM;
 }
 
-int mt76_dma_alloc_tx_bounce(struct mt76_dev *dev, struct mt76_queue *q)
+int mt76_dma_alloc_tx_bounce(struct mt76_dev *dev, struct mt76_queue *q,
+			     u32 entries, u32 stride)
 {
 	size_t bounce_size;
 
 	if (q->tx_bounce_buf)
 		return 0;
+	if (entries < q->ndesc || !stride)
+		return -EINVAL;
 
-	q->tx_bounce_stride = MT7932_TX_BOUNCE_STRIDE;
-	q->tx_bounce_entries = q->ndesc;
+	q->tx_bounce_stride = stride;
+	q->tx_bounce_entries = entries;
 	bounce_size = q->tx_bounce_entries * q->tx_bounce_stride;
 	q->tx_bounce_buf = dmam_alloc_coherent(dev->dma_dev, bounce_size,
 					       &q->tx_bounce_dma, GFP_KERNEL);
@@ -707,7 +700,7 @@ int mt76_dma_alloc_tx_bounce(struct mt76_dev *dev, struct mt76_queue *q)
 		return -ENOMEM;
 
 	dev_info(dev->dev,
-		 "J700_MT7932_TX_BOUNCE_POOL_PASS: hw=%u ring_entries=%d pool_entries=%u stride=%u dma=%pad bytes=%zu mode=descriptor-indexed\n",
+		 "J700_MT7932_MCU_BOUNCE_POOL_PASS: hw=%u ring_entries=%d pool_entries=%u stride=%u dma=%pad bytes=%zu\n",
 		 q->hw_idx, q->ndesc, q->tx_bounce_entries,
 		 q->tx_bounce_stride, &q->tx_bounce_dma, bounce_size);
 
