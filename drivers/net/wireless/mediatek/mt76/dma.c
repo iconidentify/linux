@@ -8,6 +8,10 @@
 #include "dma.h"
 #include "mt76_connac.h"
 
+#define MT7932_MCU_BOUNCE_STRIDE	8192
+#define MT7932_MCU_WM_BOUNCE_ENTRIES	64
+#define MT7932_MCU_FWDL_BOUNCE_ENTRIES	512
+
 static struct mt76_txwi_cache *
 mt76_alloc_txwi(struct mt76_dev *dev)
 {
@@ -930,6 +934,21 @@ mt76_dma_alloc_queue(struct mt76_dev *dev, struct mt76_queue *q,
 	q->entry = devm_kzalloc(dev->dev, size, GFP_KERNEL);
 	if (!q->entry)
 		return -ENOMEM;
+
+	/* Cycle126 installed the coherent MCU payload mapping before publishing
+	 * and resetting either firmware ring.  Preserve that ordering: mapping a
+	 * pool after the ring is visible is not equivalent once ROM firmware has
+	 * cached the device-side translation path.
+	 */
+	if (mt76_chip(dev) == 0x7932 && (idx == 16 || idx == 17)) {
+		u32 entries = idx == 16 ? MT7932_MCU_FWDL_BOUNCE_ENTRIES :
+					 MT7932_MCU_WM_BOUNCE_ENTRIES;
+
+		ret = mt76_dma_alloc_tx_bounce(dev, q, entries,
+					       MT7932_MCU_BOUNCE_STRIDE);
+		if (ret)
+			return ret;
+	}
 
 	ret = mt76_create_page_pool(dev, q);
 	if (ret)

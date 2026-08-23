@@ -295,26 +295,12 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 				  layout.mcu_tx_ring_size, MT_TX_RING_BASE);
 	if (ret)
 		return ret;
-	if (is_mt7932(&dev->mt76)) {
-		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
-					       dev->mt76.q_mcu[MT_MCUQ_WM],
-					       64, 8192);
-		if (ret)
-			return ret;
-	}
 
 	/* firmware download */
 	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_FWDL, MT7921_TXQ_FWDL,
 				  layout.fwdl_tx_ring_size, MT_TX_RING_BASE);
 	if (ret)
 		return ret;
-	if (is_mt7932(&dev->mt76)) {
-		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
-					       dev->mt76.q_mcu[MT_MCUQ_FWDL],
-					       512, 8192);
-		if (ret)
-			return ret;
-	}
 
 	/* event from WM before firmware download */
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU],
