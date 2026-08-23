@@ -54,7 +54,6 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 		}
 	} else if (is_mt7932(mdev) &&
 		   (cmd == MCU_CMD(TARGET_ADDRESS_LEN_REQ) ||
-		    cmd == MCU_CMD(PATCH_START_REQ) ||
 		    cmd == MCU_CMD(FW_START_REQ))) {
 		u8 response_cid;
 
