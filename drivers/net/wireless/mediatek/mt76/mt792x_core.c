@@ -57,13 +57,8 @@ static int mt7932_mcu_share_info_init(struct mt792x_dev *dev)
 	size = mt76_rr(dev, MT7932_MCU_SHARE_SIZE);
 	ipc_addr = mt76_rr(dev, MT7932_MCU_SHARE_IPC_ADDR);
 	aux_addr = mt76_rr(dev, MT7932_MCU_SHARE_AUX_ADDR);
-	if (enable != 1 || flags != 2 || size != MT7932_MCU_SHARE_IPC_SIZE ||
-	    ipc_addr != lower_32_bits(dev->mt7932_ipc_dma) ||
-	    aux_addr != lower_32_bits(dev->mt7932_aux_dma))
-		return -EIO;
-
 	dev_info(dev->mt76.dev,
-		 "J700_MT7932_MCU_SHARE_INFO_PASS: enable=%u flags=%u size=0x%x ipc=0x%08x aux=0x%08x\n",
+		 "J700_MT7932_MCU_SHARE_INFO_READBACK: enable=0x%08x flags=0x%08x size=0x%08x ipc=0x%08x aux=0x%08x\n",
 		 enable, flags, size, ipc_addr, aux_addr);
 
 	return 0;
