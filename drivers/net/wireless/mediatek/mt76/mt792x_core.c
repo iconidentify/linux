@@ -930,7 +930,11 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 	u8 otp_mode = 0, otp_format = 0;
 	int i;
 
-	mt76_connac_mcu_restart(&dev->mt76);
+	if (mt7932)
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_MCU_RESTART_SKIP: source=apple-normal-start\n");
+	else
+		mt76_connac_mcu_restart(&dev->mt76);
 
 	if (!mt76_poll_msec(dev, MT_CONN_ON_MISC, MT_TOP_MISC_FW_STATE,
 			    MT_TOP_MISC2_FW_PWR_ON, 1000))
