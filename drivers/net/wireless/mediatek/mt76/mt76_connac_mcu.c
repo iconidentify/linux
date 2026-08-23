@@ -3366,9 +3366,23 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 	/* TODO: make dynamic based on msg type */
 	dev->mcu.timeout = 20 * HZ;
 
-	seq = ++dev->mcu.msg_seq & 0xf;
-	if (!seq)
+	/* Apple's MT7932 init ABI uses the complete nonzero sequence byte and
+	 * allocates it only for packets that carry an init header.  Raw scatter
+	 * payloads have no header and must not consume 600 sequence numbers.
+	 */
+	if (mt7932 && cmd == MCU_CMD(FW_SCATTER)) {
+		seq = dev->mcu.msg_seq;
+		goto exit;
+	}
+	if (mt7932) {
+		seq = ++dev->mcu.msg_seq;
+		if (!seq)
+			seq = ++dev->mcu.msg_seq;
+	} else {
 		seq = ++dev->mcu.msg_seq & 0xf;
+		if (!seq)
+			seq = ++dev->mcu.msg_seq & 0xf;
+	}
 
 	if (cmd == MCU_CMD(FW_SCATTER))
 		goto exit;
