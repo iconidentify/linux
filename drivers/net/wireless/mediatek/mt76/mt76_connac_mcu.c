@@ -3121,8 +3121,6 @@ next:
 
 	if (override)
 		option |= FW_START_OVERRIDE;
-	if (is_mt7932(dev))
-		option |= FW_START_DELAY_CALIBRATION;
 	if (is_wa)
 		option |= FW_START_WORKING_PDA_CR4;
 
