@@ -17,6 +17,14 @@
 #define MT7921_RX_MCU_RING_SIZE		8
 #define MT7921_RX_MCU_WA_RING_SIZE	512
 
+#define MT7932_TX_MCU_RING_SIZE		24
+#define MT7932_TX_FWDL_RING_SIZE		256
+#define MT7932_TX_RING_SIZE		512
+#define MT7932_RX_RING_SIZE		512
+#define MT7932_RX_MCU_RING_SIZE		32
+#define MT7932_RX_MCU_WA_RING_SIZE	32
+#define MT7932_RX_BUF_SIZE		0x930
+
 /* MT7902 Rx Ring0 is for both Rx Event and Tx Done Event */
 #define MT7902_RX_MCU_RING_SIZE		512
 
@@ -129,7 +137,13 @@ enum mt7902_txq_id {
 
 struct mt7921_dma_layout {
 	u8 mcu_wm_txq;
+	u16 data_tx_ring_size;
+	u16 mcu_tx_ring_size;
+	u16 fwdl_tx_ring_size;
+	u16 data_rx_ring_size;
 	u16 mcu_rxdone_ring_size;
+	u16 mcu_wa_rxdone_ring_size;
+	u16 rx_buf_size;
 	bool has_mcu_wa;
 };
 
@@ -214,6 +228,8 @@ int mt7921_mcu_sta_update(struct mt792x_dev *dev, struct ieee80211_sta *sta,
 int mt7921_mcu_set_chan_info(struct mt792x_phy *phy, int cmd);
 int mt7921_mcu_set_tx(struct mt792x_dev *dev, struct ieee80211_vif *vif);
 int mt7921_mcu_set_eeprom(struct mt792x_dev *dev);
+int mt7932_mcu_load_wcal(struct mt792x_dev *dev);
+int mt7932_mcu_load_one_time_cal(struct mt792x_dev *dev);
 int mt7921_mcu_get_rx_rate(struct mt792x_phy *phy, struct ieee80211_vif *vif,
 			   struct ieee80211_sta *sta, struct rate_info *rate);
 int mt7921_mcu_fw_log_2_host(struct mt792x_dev *dev, u8 ctrl);

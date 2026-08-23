@@ -106,6 +106,7 @@
 #define DART_T8110_TLB_CMD_OP_FLUSH_ALL 0
 #define DART_T8110_TLB_CMD_OP_FLUSH_SID 1
 #define DART_T8110_TLB_CMD_STREAM       GENMASK(7, 0)
+#define DART_T8110_TLB_CMD_V2           BIT(15)
 
 #define DART_T8110_ERROR 0x100
 #define DART_T8110_ERROR_STREAM GENMASK(27, 20)
@@ -204,6 +205,8 @@ struct apple_dart_hw {
  * @pgsize: pagesize supported by this DART
  * @supports_bypass: indicates if this DART supports bypass mode
  * @locked: indicates if this DART is locked
+ * @tlb_cmd_v2: indicates the v2.2+ TLB command format
+ * @force_available: keep the runtime-PM reference acquired during probe
  * @sid2group: maps stream ids to iommu_groups
  * @iommu: iommu core device
  */
@@ -226,6 +229,8 @@ struct apple_dart {
 	u32 supports_bypass : 1;
 	u32 four_level : 1;
 	u32 locked : 1;
+	u32 tlb_cmd_v2 : 1;
+	u32 force_available : 1;
 
 	dma_addr_t dma_min;
 	dma_addr_t dma_max;
@@ -511,6 +516,9 @@ apple_dart_t8110_hw_tlb_command(struct apple_dart_stream_map *stream_map,
 	for_each_set_bit(sid, stream_map->sidmap, dart->num_streams) {
 		u32 val = FIELD_PREP(DART_T8110_TLB_CMD_OP, command) |
 			FIELD_PREP(DART_T8110_TLB_CMD_STREAM, sid);
+
+		if (command == DART_T8110_TLB_CMD_OP_FLUSH_SID && dart->tlb_cmd_v2)
+			val |= DART_T8110_TLB_CMD_V2;
 		writel(val, dart->regs + DART_T8110_TLB_CMD);
 
 		ret = readl_poll_timeout_atomic(
@@ -1332,6 +1340,8 @@ static int apple_dart_probe(struct platform_device *pdev)
 
 	dart->dev = dev;
 	dart->hw = of_device_get_match_data(dev);
+	dart->force_available =
+		of_property_read_bool(dev->of_node, "apple,force-available");
 	spin_lock_init(&dart->lock);
 
 	dart->regs = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
@@ -1384,6 +1394,11 @@ static int apple_dart_probe(struct platform_device *pdev)
 		dart->oas = FIELD_GET(DART_T8110_PARAMS3_PA_WIDTH, dart_params[2]);
 		dart->num_streams = FIELD_GET(DART_T8110_PARAMS4_NUM_SIDS, dart_params[3]);
 		dart->four_level = dart->ias > 36;
+		dart->tlb_cmd_v2 = (dart_params[2] & GENMASK(15, 0)) >= 0x0202;
+		if (dart->tlb_cmd_v2)
+			dev_info(dev, "DART v%lu.%lu uses v2 TLB commands\n",
+				 FIELD_GET(DART_T8110_PARAMS3_VER_MAJ, dart_params[2]),
+				 FIELD_GET(DART_T8110_PARAMS3_VER_MIN, dart_params[2]));
 		break;
 	}
 
@@ -1438,7 +1453,10 @@ static int apple_dart_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_sysfs_remove;
 
-	pm_runtime_put(dev);
+	if (dart->force_available)
+		dev_info(dev, "forcing DART available for its lifetime\n");
+	else
+		pm_runtime_put(dev);
 
 	dev_info(
 		&pdev->dev,
@@ -1469,6 +1487,8 @@ static void apple_dart_remove(struct platform_device *pdev)
 
 	iommu_device_unregister(&dart->iommu);
 	iommu_device_sysfs_remove(&dart->iommu);
+	if (dart->force_available)
+		pm_runtime_put_noidle(dart->dev);
 
 	clk_bulk_disable_unprepare(dart->num_clks, dart->clks);
 }

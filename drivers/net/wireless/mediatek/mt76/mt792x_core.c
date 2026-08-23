@@ -925,6 +925,7 @@ EXPORT_SYMBOL_GPL(mt792xe_mcu_fw_pmctrl);
 int mt792x_load_firmware(struct mt792x_dev *dev)
 {
 	int ret;
+	bool mt7932 = is_mt7932(&dev->mt76);
 
 	mt76_connac_mcu_restart(&dev->mt76);
 
@@ -933,9 +934,20 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 		dev_warn(dev->mt76.dev,
 			 "MCU is not ready for firmware download\n");
 
+	if (mt7932)
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_PATCH_UPLOAD_BEGIN: file=%s\n",
+			 mt792x_patch_name(dev));
 	ret = mt76_connac2_load_patch(&dev->mt76, mt792x_patch_name(dev));
-	if (ret)
+	if (ret) {
+		if (mt7932)
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=patch-upload ret=%d\n",
+				ret);
 		return ret;
+	}
+	if (mt7932)
+		dev_info(dev->mt76.dev, "J700_MT7932_PATCH_UPLOAD_PASS\n");
 
 	if (mt76_is_sdio(&dev->mt76)) {
 		/* activate again */
@@ -944,16 +956,33 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 			ret = __mt792x_mcu_drv_pmctrl(dev);
 	}
 
+	if (mt7932)
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_RAM_UPLOAD_BEGIN: file=%s\n",
+			 mt792x_ram_name(dev));
 	ret = mt76_connac2_load_ram(&dev->mt76, mt792x_ram_name(dev), NULL);
-	if (ret)
+	if (ret) {
+		if (mt7932)
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=ram-upload ret=%d\n",
+				ret);
 		return ret;
+	}
+	if (mt7932)
+		dev_info(dev->mt76.dev, "J700_MT7932_RAM_UPLOAD_PASS\n");
 
 	if (!mt76_poll_msec(dev, MT_CONN_ON_MISC, MT_TOP_MISC2_FW_N9_RDY,
-			    MT_TOP_MISC2_FW_N9_RDY, 1500)) {
+			    MT_TOP_MISC2_FW_N9_RDY, mt7932 ? 5000 : 1500)) {
 		dev_err(dev->mt76.dev, "Timeout for initializing firmware\n");
+		if (mt7932)
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=n9-ready ret=%d\n",
+				-EIO);
 
 		return -EIO;
 	}
+	if (mt7932)
+		dev_info(dev->mt76.dev, "J700_MT7932_N9_READY_PASS\n");
 
 #ifdef CONFIG_PM
 	dev->mt76.hw->wiphy->wowlan = &mt76_connac_wowlan_support;

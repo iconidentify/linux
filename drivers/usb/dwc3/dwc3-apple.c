@@ -638,6 +638,32 @@ static int dwc3_apple_role_input_set(struct usb_role_switch *sw,
 				 role);
 	}
 
+	/*
+	 * CD321x resets the stateful eUSB2 repeater out-of-band when a cable is
+	 * connected.  The fixed-hub policy deliberately keeps DWC3/xHCI alive,
+	 * so it must still perform Apple's matching 5-ms USB2 PHY port reset or
+	 * xHCI can retain the disconnect state without delivering a new connect
+	 * event.  Apply it to every real NONE -> HOST transition, including the
+	 * connected-at-boot notification: the qualified fixed-hub DT deliberately
+	 * has no apple,j700-usb2-retry-reset property, so usb2_retry_done is not a
+	 * valid readiness gate for this independent hotplug synchronization.
+	 */
+	if (!ret && appledwc->usb2_hub_always_on &&
+	    old_role == USB_ROLE_NONE &&
+	    role == USB_ROLE_HOST && appledwc->dwc.usb2_generic_phy[0]) {
+		dwc3_apple_dump_usb2_state(appledwc, "hotplug-pre-reset");
+		ret = phy_reset(appledwc->dwc.usb2_generic_phy[0]);
+		dwc3_apple_dump_usb2_state(appledwc, "hotplug-post-reset");
+		if (ret)
+			dev_err(appledwc->dev,
+				"J700_USB2_HOTPLUG_RESET_FAIL: input=%u old=%d requested=%d err=%d\n",
+				input->index, old_role, role, ret);
+		else
+			dev_info(appledwc->dev,
+				 "J700_USB2_HOTPLUG_RESET_PASS: input=%u old=%d requested=%d pulse_ms=5\n",
+				 input->index, old_role, role);
+	}
+
 	dev_info(appledwc->dev,
 		 "J700_USB2_FAKE_MUX_INPUT: input=%u old=%d requested=%d aggregate=%d roles=%d/%d state=%d ret=%d\n",
 		 input->index, old_role, role, USB_ROLE_HOST,

@@ -8,6 +8,8 @@
 #include "dma.h"
 #include "mt76_connac.h"
 
+#define MT7932_TX_BOUNCE_STRIDE	16384
+
 static struct mt76_txwi_cache *
 mt76_alloc_txwi(struct mt76_dev *dev)
 {
@@ -113,6 +115,26 @@ mt76_put_txwi(struct mt76_dev *dev, struct mt76_txwi_cache *t)
 	spin_unlock(&dev->lock);
 }
 EXPORT_SYMBOL_GPL(mt76_put_txwi);
+
+int mt76_dma_prealloc_txwi(struct mt76_dev *dev, int count)
+{
+	struct mt76_txwi_cache *t;
+	int i;
+
+	for (i = 0; i < count; i++) {
+		t = mt76_alloc_txwi(dev);
+		if (!t)
+			return -ENOMEM;
+		mt76_put_txwi(dev, t);
+	}
+
+	dev_info(dev->dev,
+		 "J700_MT7932_TXWI_PREALLOC_PASS: entries=%d bytes=%zu\n",
+		 count, (size_t)count * dev->drv->txwi_size);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt76_dma_prealloc_txwi);
 
 void
 mt76_put_rxwi(struct mt76_dev *dev, struct mt76_txwi_cache *t)
@@ -609,6 +631,8 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 {
 	struct mt76_queue_buf buf = {};
 	dma_addr_t addr;
+	void *bounce;
+	u32 bounce_slot;
 
 	if (test_bit(MT76_MCU_RESET, &dev->phy.state))
 		goto error;
@@ -616,10 +640,33 @@ mt76_dma_tx_queue_skb_raw(struct mt76_dev *dev, struct mt76_queue *q,
 	if (q->queued + 1 >= q->ndesc - 1)
 		goto error;
 
-	addr = dma_map_single(dev->dma_dev, skb->data, skb->len,
-			      DMA_TO_DEVICE);
-	if (unlikely(dma_mapping_error(dev->dma_dev, addr)))
-		goto error;
+	if (q->tx_bounce_buf) {
+		if (skb->len > q->tx_bounce_stride)
+			goto error;
+
+		/* The ring-space check above guarantees that the descriptor-indexed
+		 * slot is no longer owned by hardware when head wraps.
+		 */
+		bounce_slot = READ_ONCE(q->head);
+		if (bounce_slot >= q->tx_bounce_entries)
+			goto error;
+		bounce = (u8 *)q->tx_bounce_buf +
+			 bounce_slot * q->tx_bounce_stride;
+		memcpy(bounce, skb->data, skb->len);
+		addr = q->tx_bounce_dma + bounce_slot * q->tx_bounce_stride;
+		buf.skip_unmap = true;
+		if (!q->tx_bounce_logged) {
+			dev_info(dev->dev,
+				 "J700_MT7932_TX_BOUNCE_ACTIVE: hw=%u stride=%u\n",
+				 q->hw_idx, q->tx_bounce_stride);
+			q->tx_bounce_logged = true;
+		}
+	} else {
+		addr = dma_map_single(dev->dma_dev, skb->data, skb->len,
+				      DMA_TO_DEVICE);
+		if (unlikely(dma_mapping_error(dev->dma_dev, addr)))
+			goto error;
+	}
 
 	buf.addr = addr;
 	buf.len = skb->len;
@@ -635,6 +682,30 @@ error:
 	dev_kfree_skb(skb);
 	return -ENOMEM;
 }
+
+int mt76_dma_alloc_tx_bounce(struct mt76_dev *dev, struct mt76_queue *q)
+{
+	size_t bounce_size;
+
+	if (q->tx_bounce_buf)
+		return 0;
+
+	q->tx_bounce_stride = MT7932_TX_BOUNCE_STRIDE;
+	q->tx_bounce_entries = q->ndesc;
+	bounce_size = q->tx_bounce_entries * q->tx_bounce_stride;
+	q->tx_bounce_buf = dmam_alloc_coherent(dev->dma_dev, bounce_size,
+					       &q->tx_bounce_dma, GFP_KERNEL);
+	if (!q->tx_bounce_buf)
+		return -ENOMEM;
+
+	dev_info(dev->dev,
+		 "J700_MT7932_TX_BOUNCE_POOL_PASS: hw=%u ring_entries=%d pool_entries=%u stride=%u dma=%pad bytes=%zu mode=descriptor-indexed\n",
+		 q->hw_idx, q->ndesc, q->tx_bounce_entries,
+		 q->tx_bounce_stride, &q->tx_bounce_dma, bounce_size);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mt76_dma_alloc_tx_bounce);
 
 static int
 mt76_dma_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
@@ -653,6 +724,8 @@ mt76_dma_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
 	struct mt76_txwi_cache *t;
 	struct sk_buff *iter;
 	dma_addr_t addr;
+	void *bounce;
+	u32 bounce_slot;
 	u8 *txwi;
 
 	if (test_bit(MT76_RESET, &phy->state))
@@ -674,15 +747,34 @@ mt76_dma_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
 	if (dev->drv->drv_flags & MT_DRV_TX_ALIGNED4_SKBS)
 		mt76_insert_hdr_pad(skb);
 
-	len = skb_headlen(skb);
-	addr = dma_map_single(dev->dma_dev, skb->data, len, DMA_TO_DEVICE);
-	if (unlikely(dma_mapping_error(dev->dma_dev, addr)))
-		goto free;
+	if (q->tx_bounce_buf && mt76_chip(dev) == 0x7932) {
+		if (skb_linearize(skb))
+			goto free;
+		len = skb->len;
+		if (len > q->tx_bounce_stride ||
+		    q->queued + 1 >= q->ndesc - 1)
+			goto free;
+		bounce_slot = READ_ONCE(q->head);
+		if (bounce_slot >= q->tx_bounce_entries)
+			goto free;
+		bounce = (u8 *)q->tx_bounce_buf +
+			 bounce_slot * q->tx_bounce_stride;
+		memcpy(bounce, skb->data, len);
+		addr = q->tx_bounce_dma + bounce_slot * q->tx_bounce_stride;
+	} else {
+		len = skb_headlen(skb);
+		addr = dma_map_single(dev->dma_dev, skb->data, len,
+				      DMA_TO_DEVICE);
+		if (unlikely(dma_mapping_error(dev->dma_dev, addr)))
+			goto free;
+	}
 
 	tx_info.buf[n].addr = t->dma_addr;
 	tx_info.buf[n++].len = dev->drv->txwi_size;
 	tx_info.buf[n].addr = addr;
 	tx_info.buf[n++].len = len;
+	if (q->tx_bounce_buf && mt76_chip(dev) == 0x7932)
+		tx_info.buf[n - 1].skip_unmap = true;
 
 	skb_walk_frags(skb, iter) {
 		if (n == ARRAY_SIZE(tx_info.buf))
@@ -719,8 +811,9 @@ mt76_dma_tx_queue_skb(struct mt76_phy *phy, struct mt76_queue *q,
 
 unmap:
 	for (n--; n > 0; n--)
-		dma_unmap_single(dev->dma_dev, tx_info.buf[n].addr,
-				 tx_info.buf[n].len, DMA_TO_DEVICE);
+		if (!tx_info.buf[n].skip_unmap)
+			dma_unmap_single(dev->dma_dev, tx_info.buf[n].addr,
+					 tx_info.buf[n].len, DMA_TO_DEVICE);
 
 free:
 #ifdef CONFIG_NL80211_TESTMODE

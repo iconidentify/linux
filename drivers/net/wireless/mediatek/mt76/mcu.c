@@ -138,7 +138,11 @@ EXPORT_SYMBOL_GPL(mt76_mcu_skb_send_and_get_msg);
 int __mt76_mcu_send_firmware(struct mt76_dev *dev, int cmd, const void *data,
 			     int len, int max_len)
 {
+	struct mt76_queue *q;
 	int err, cur_len;
+
+	q = mt76_chip(dev) == 0x7932 && mt76_is_mmio(dev) ?
+		dev->phy.q_tx[MT_TXQ_BE] : dev->q_mcu[MT_MCUQ_FWDL];
 
 	while (len > 0) {
 		cur_len = min_t(int, max_len, len);
@@ -151,9 +155,7 @@ int __mt76_mcu_send_firmware(struct mt76_dev *dev, int cmd, const void *data,
 		len -= cur_len;
 
 		if (dev->queue_ops->tx_cleanup)
-			dev->queue_ops->tx_cleanup(dev,
-						   dev->q_mcu[MT_MCUQ_FWDL],
-						   false);
+			dev->queue_ops->tx_cleanup(dev, q, false);
 	}
 
 	return 0;

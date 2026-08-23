@@ -18,6 +18,8 @@ static const struct pci_device_id mt7921_pci_device_table[] = {
 		.driver_data = (kernel_ulong_t)MT7921_FIRMWARE_WM },
 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7922),
 		.driver_data = (kernel_ulong_t)MT7922_FIRMWARE_WM },
+	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x7932),
+		.driver_data = (kernel_ulong_t)MT7932_FIRMWARE_WM },
 	{ PCI_DEVICE(PCI_VENDOR_ID_ITTIM, 0x7922),
 		.driver_data = (kernel_ulong_t)MT7922_FIRMWARE_WM },
 	{ PCI_DEVICE(PCI_VENDOR_ID_MEDIATEK, 0x0608),
@@ -167,12 +169,85 @@ static u32 mt7921_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
 	return dev->bus_ops->rmw(mdev, addr, mask, val);
 }
 
+static int mt7932_dma_sched_init(struct mt792x_dev *dev)
+{
+	static const u32 quota[16] = {
+		0x02000028, 0x02000028, 0x02000028, 0x02000028,
+		0x01000014, 0x01000028, 0x01000028, 0x01000028,
+		0x01000014, 0x01000028, 0x01000028, 0x01000028,
+		0x01000014, 0x01000028, 0x01000028, 0x00000000,
+	};
+	int i;
+
+	/* Exact effective image produced by AppleSunriseWLAN 25G83
+	 * _mt7922DmashdlInit before WFDMA ring allocation.
+	 */
+	mt76_rmw(dev, MT_DMASHDL_PKT_MAX_SIZE,
+		 MT_DMASHDL_PKT_MAX_SIZE_PLE | MT_DMASHDL_PKT_MAX_SIZE_PSE,
+		 FIELD_PREP(MT_DMASHDL_PKT_MAX_SIZE_PLE, 1));
+	mt76_rmw(dev, MT_DMASHDL_REFILL, MT_DMASHDL_REFILL_MASK, BIT(31));
+	for (i = 0; i < ARRAY_SIZE(quota); i++)
+		mt76_wr(dev, MT_DMASHDL_GROUP_QUOTA(i), quota[i]);
+
+	mt76_wr(dev, MT_DMASHDL_Q_MAP(0), 0x76543210);
+	mt76_wr(dev, MT_DMASHDL_Q_MAP(1), 0xfedcba98);
+	mt76_wr(dev, MT_DMASHDL_Q_MAP(2), 0x11111000);
+	mt76_wr(dev, MT_DMASHDL_Q_MAP(3), 0x11111000);
+	mt76_wr(dev, MT_DMASHDL_SCHED_SET(0), 0x76543210);
+	mt76_wr(dev, MT_DMASHDL_SCHED_SET(1), 0xfedcba98);
+	mt76_rmw(dev, MT_DMASHDL_PAGE, GENMASK(17, 16), BIT(16));
+	mt76_clear(dev, MT_DMASHDL_SW_CONTROL, MT_DMASHDL_DMASHDL_BYPASS);
+
+	if ((mt76_rr(dev, MT_DMASHDL_PKT_MAX_SIZE) &
+	     (MT_DMASHDL_PKT_MAX_SIZE_PLE | MT_DMASHDL_PKT_MAX_SIZE_PSE)) != 1 ||
+	    (mt76_rr(dev, MT_DMASHDL_REFILL) & MT_DMASHDL_REFILL_MASK) != BIT(31) ||
+	    (mt76_rr(dev, MT_DMASHDL_PAGE) & GENMASK(17, 16)) != BIT(16) ||
+	    (mt76_rr(dev, MT_DMASHDL_SW_CONTROL) &
+	     MT_DMASHDL_DMASHDL_BYPASS) ||
+	    mt76_rr(dev, MT_DMASHDL_Q_MAP(0)) != 0x76543210 ||
+	    mt76_rr(dev, MT_DMASHDL_Q_MAP(1)) != 0xfedcba98 ||
+	    mt76_rr(dev, MT_DMASHDL_Q_MAP(2)) != 0x11111000 ||
+	    mt76_rr(dev, MT_DMASHDL_Q_MAP(3)) != 0x11111000 ||
+	    mt76_rr(dev, MT_DMASHDL_SCHED_SET(0)) != 0x76543210 ||
+	    mt76_rr(dev, MT_DMASHDL_SCHED_SET(1)) != 0xfedcba98)
+		return -EIO;
+
+	for (i = 0; i < ARRAY_SIZE(quota); i++)
+		if ((mt76_rr(dev, MT_DMASHDL_GROUP_QUOTA(i)) &
+		     (MT_DMASHDL_GROUP_QUOTA_MIN |
+		      MT_DMASHDL_GROUP_QUOTA_MAX)) != quota[i])
+			return -EIO;
+
+	dev_info(dev->mt76.dev,
+		 "J700_MT7932_DMASHDL_PASS: page=%08x refill=%08x pkt=%08x qmap=%08x/%08x/%08x/%08x sched=%08x/%08x quota0=%08x quota4=%08x quota15=%08x\n",
+		 mt76_rr(dev, MT_DMASHDL_PAGE),
+		 mt76_rr(dev, MT_DMASHDL_REFILL),
+		 mt76_rr(dev, MT_DMASHDL_PKT_MAX_SIZE),
+		 mt76_rr(dev, MT_DMASHDL_Q_MAP(0)),
+		 mt76_rr(dev, MT_DMASHDL_Q_MAP(1)),
+		 mt76_rr(dev, MT_DMASHDL_Q_MAP(2)),
+		 mt76_rr(dev, MT_DMASHDL_Q_MAP(3)),
+		 mt76_rr(dev, MT_DMASHDL_SCHED_SET(0)),
+		 mt76_rr(dev, MT_DMASHDL_SCHED_SET(1)),
+		 mt76_rr(dev, MT_DMASHDL_GROUP_QUOTA(0)),
+		 mt76_rr(dev, MT_DMASHDL_GROUP_QUOTA(4)),
+		 mt76_rr(dev, MT_DMASHDL_GROUP_QUOTA(15)));
+
+	return 0;
+}
+
 static int mt7921_dma_init(struct mt792x_dev *dev)
 {
 	struct mt7921_dma_layout layout = {
 		/* General case: MT7921 / MT7922 /MT7920 */
 		.mcu_wm_txq            = MT7921_TXQ_MCU_WM,
+		.data_tx_ring_size     = MT7921_TX_RING_SIZE,
+		.mcu_tx_ring_size      = MT7921_TX_MCU_RING_SIZE,
+		.fwdl_tx_ring_size     = MT7921_TX_FWDL_RING_SIZE,
+		.data_rx_ring_size     = MT7921_RX_RING_SIZE,
 		.mcu_rxdone_ring_size  = MT7921_RX_MCU_RING_SIZE,
+		.mcu_wa_rxdone_ring_size = MT7921_RX_MCU_WA_RING_SIZE,
+		.rx_buf_size           = MT_RX_BUF_SIZE,
 		.has_mcu_wa            = true,
 	};
 	bool is_mt7902;
@@ -191,31 +266,67 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		layout.mcu_rxdone_ring_size = MT7902_RX_MCU_RING_SIZE;
 		layout.has_mcu_wa           = false;
 	}
+	if (is_mt7932(&dev->mt76)) {
+		layout.data_tx_ring_size = MT7932_TX_RING_SIZE;
+		layout.mcu_tx_ring_size = MT7932_TX_MCU_RING_SIZE;
+		layout.fwdl_tx_ring_size = MT7932_TX_FWDL_RING_SIZE;
+		layout.data_rx_ring_size = MT7932_RX_RING_SIZE;
+		layout.mcu_rxdone_ring_size = MT7932_RX_MCU_RING_SIZE;
+		layout.mcu_wa_rxdone_ring_size = MT7932_RX_MCU_WA_RING_SIZE;
+		layout.rx_buf_size = MT7932_RX_BUF_SIZE;
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_DMA_LAYOUT: tx0=%u tx17=%u tx16=%u rx0=%u rx2=%u rx4=%u rxbuf=%u\n",
+			 layout.data_tx_ring_size, layout.mcu_tx_ring_size,
+			 layout.fwdl_tx_ring_size, layout.mcu_rxdone_ring_size,
+			 layout.data_rx_ring_size,
+			 layout.mcu_wa_rxdone_ring_size, layout.rx_buf_size);
+	}
 
 	mt76_dma_attach(&dev->mt76);
 
 	ret = mt792x_dma_disable(dev, true);
 	if (ret)
 		return ret;
+	if (is_mt7932(&dev->mt76)) {
+		ret = mt7932_dma_sched_init(dev);
+		if (ret)
+			return ret;
+	}
 
 	/* init tx queue */
 	ret = mt76_connac_init_tx_queues(dev->phy.mt76, MT7921_TXQ_BAND0,
-					 MT7921_TX_RING_SIZE,
+					 layout.data_tx_ring_size,
 					 MT_TX_RING_BASE, NULL, 0);
 	if (ret)
 		return ret;
+	if (is_mt7932(&dev->mt76)) {
+		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
+					       dev->mphy.q_tx[MT_TXQ_BE]);
+		if (ret)
+			return ret;
+		ret = mt76_dma_prealloc_txwi(&dev->mt76,
+					     layout.data_tx_ring_size);
+		if (ret)
+			return ret;
+	}
 
 	mt76_wr(dev, MT_WFDMA0_TX_RING0_EXT_CTRL, 0x4);
 
 	/* command to WM */
 	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_WM, layout.mcu_wm_txq,
-				  MT7921_TX_MCU_RING_SIZE, MT_TX_RING_BASE);
+				  layout.mcu_tx_ring_size, MT_TX_RING_BASE);
 	if (ret)
 		return ret;
+	if (is_mt7932(&dev->mt76)) {
+		ret = mt76_dma_alloc_tx_bounce(&dev->mt76,
+					       dev->mt76.q_mcu[MT_MCUQ_WM]);
+		if (ret)
+			return ret;
+	}
 
 	/* firmware download */
 	ret = mt76_init_mcu_queue(&dev->mt76, MT_MCUQ_FWDL, MT7921_TXQ_FWDL,
-				  MT7921_TX_FWDL_RING_SIZE, MT_TX_RING_BASE);
+				  layout.fwdl_tx_ring_size, MT_TX_RING_BASE);
 	if (ret)
 		return ret;
 
@@ -223,7 +334,7 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU],
 			       MT7921_RXQ_MCU_WM,
 			       layout.mcu_rxdone_ring_size,
-			       MT_RX_BUF_SIZE, MT_RX_EVENT_RING_BASE);
+			       layout.rx_buf_size, MT_RX_EVENT_RING_BASE);
 	if (ret)
 		return ret;
 
@@ -231,16 +342,16 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 		/* Change mcu queue after firmware download */
 		ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
 				       MT7921_RXQ_MCU_WM,
-				       MT7921_RX_MCU_WA_RING_SIZE,
-				       MT_RX_BUF_SIZE, MT_WFDMA0(0x540));
+				       layout.mcu_wa_rxdone_ring_size,
+				       layout.rx_buf_size, MT_WFDMA0(0x540));
 		if (ret)
 			return ret;
 	}
 
 	/* rx data */
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MAIN],
-			       MT7921_RXQ_BAND0, MT7921_RX_RING_SIZE,
-			       MT_RX_BUF_SIZE, MT_RX_DATA_RING_BASE);
+			       MT7921_RXQ_BAND0, layout.data_rx_ring_size,
+			       layout.rx_buf_size, MT_RX_DATA_RING_BASE);
 	if (ret)
 		return ret;
 
@@ -321,7 +432,10 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	if (ret < 0)
 		return ret;
 
-	ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+	if (id->device == 0x7932)
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(31));
+	else
+		ret = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret)
 		goto err_free_pci_vec;
 
@@ -388,6 +502,9 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	bus_ops->wr = mt7921_wr;
 	bus_ops->rmw = mt7921_rmw;
 	dev->mt76.bus = bus_ops;
+	if (id->device == 0x7932)
+		dev_info(mdev->dev,
+			 "J700_MT7932_PROBE_ENTER: pci=14c3:7932 bar0=ready dma_mask=31 diagnostic=1\n");
 
 	if (!mt7921_disable_aspm && mt76_pci_aspm_supported(pdev))
 		dev->aspm_supported = true;
@@ -406,10 +523,16 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	mdev->rev = (chipid << 16) |
 		    (mt7921_l1_rr(dev, MT_HW_REV) & 0xff);
 	dev_info(mdev->dev, "ASIC revision: %04x\n", mdev->rev);
+	if (id->device == 0x7932)
+		dev_info(mdev->dev,
+			 "J700_MT7932_FIRMWARE_GATE_BEGIN: chipid=0x%04x revision=0x%08x\n",
+			 chipid, mdev->rev);
 
 	ret = mt792x_wfsys_reset(dev);
 	if (ret)
 		goto err_free_dev;
+	if (id->device == 0x7932)
+		dev_info(mdev->dev, "J700_MT7932_WFSYS_RESET_PASS\n");
 
 	mt76_wr(dev, irq_map.host_irq_enable, 0);
 
@@ -423,6 +546,8 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	ret = mt7921_dma_init(dev);
 	if (ret)
 		goto err_free_irq;
+	if (id->device == 0x7932)
+		dev_info(mdev->dev, "J700_MT7932_DMA_INIT_PASS\n");
 
 	ret = mt7921_register_device(dev);
 	if (ret)
@@ -624,6 +749,10 @@ MODULE_FIRMWARE(MT7921_FIRMWARE_WM);
 MODULE_FIRMWARE(MT7921_ROM_PATCH);
 MODULE_FIRMWARE(MT7922_FIRMWARE_WM);
 MODULE_FIRMWARE(MT7922_ROM_PATCH);
+MODULE_FIRMWARE(MT7932_FIRMWARE_WM);
+MODULE_FIRMWARE(MT7932_ROM_PATCH);
+MODULE_FIRMWARE(MT7932_WCAL);
+MODULE_FIRMWARE(MT7932_ONE_TIME_CAL);
 MODULE_FIRMWARE(MT7902_FIRMWARE_WM);
 MODULE_FIRMWARE(MT7902_ROM_PATCH);
 MODULE_AUTHOR("Sean Wang <sean.wang@mediatek.com>");

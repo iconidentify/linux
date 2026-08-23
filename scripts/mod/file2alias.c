@@ -107,6 +107,14 @@ typedef struct {
 	__u8 b[16];
 } guid_t;
 
+/*
+ * Host-build shim: Darwin already typedefs uuid_t (as an unsigned char[16]),
+ * so this definition collides when building the host tools on macOS. The type
+ * is private to this file, so guard it.
+ */
+#ifdef __APPLE__
+#define uuid_t kmod_uuid_t
+#endif
 typedef struct {
 	__u8 b[16];
 } uuid_t;

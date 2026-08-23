@@ -6,6 +6,35 @@
 #include "mt76_connac_mcu.h"
 #include "mt792x_regs.h"
 
+#define MT7932_SEC_BOOT_MODE		0x7c00e24c
+#define MT7932_SEC_BOOT_STATUS		0x00040060
+#define MT7932_SEC_BOOT_RELEASE		0x00040260
+#define MT7932_SEC_BOOT_MODE_ENTER	0x18451807
+#define MT7932_SEC_BOOT_MODE_EXIT	0x1845184f
+
+static int mt7932_sec_protect_fwdl(struct mt76_dev *dev, bool get)
+{
+	int ret = 0;
+	u32 status = 0;
+
+	__mt76_wr(dev, MT7932_SEC_BOOT_MODE, MT7932_SEC_BOOT_MODE_ENTER);
+	if (get) {
+		if (!__mt76_poll_msec(dev, MT7932_SEC_BOOT_STATUS,
+				      BIT(0), BIT(0), 5000))
+			ret = -ETIMEDOUT;
+		status = __mt76_rr(dev, MT7932_SEC_BOOT_STATUS);
+	} else {
+		__mt76_wr(dev, MT7932_SEC_BOOT_RELEASE, 1);
+	}
+	__mt76_wr(dev, MT7932_SEC_BOOT_MODE, MT7932_SEC_BOOT_MODE_EXIT);
+
+	dev_info(dev->dev,
+		 "J700_MT7932_SEC_PROTECT_FWDL: action=%s status=0x%08x ret=%d\n",
+		 get ? "get" : "release", status, ret);
+
+	return ret;
+}
+
 int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option)
 {
 	struct {
@@ -16,6 +45,11 @@ int mt76_connac_mcu_start_firmware(struct mt76_dev *dev, u32 addr, u32 option)
 		.addr = cpu_to_le32(addr),
 	};
 
+	if (is_mt7932(dev))
+		dev_info(dev->dev,
+			 "J700_MT7932_FW_START_REQUEST: option=0x%08x addr=0x%08x\n",
+			 option, addr);
+
 	return mt76_mcu_send_msg(dev, MCU_CMD(FW_START_REQ), &req,
 				 sizeof(req), true);
 }
@@ -23,12 +57,18 @@ EXPORT_SYMBOL_GPL(mt76_connac_mcu_start_firmware);
 
 int mt76_connac_mcu_patch_sem_ctrl(struct mt76_dev *dev, bool get)
 {
-	u32 op = get ? PATCH_SEM_GET : PATCH_SEM_RELEASE;
+	u32 op = get ? (is_mt7932(dev) ? PATCH_SEM_GET_MT7932 :
+				       PATCH_SEM_GET) : PATCH_SEM_RELEASE;
 	struct {
 		__le32 op;
 	} req = {
 		.op = cpu_to_le32(op),
 	};
+
+	if (is_mt7932(dev))
+		dev_info(dev->dev,
+			 "J700_MT7932_PATCH_SEMAPHORE: action=%s op=%u\n",
+			 get ? "get" : "release", op);
 
 	return mt76_mcu_send_msg(dev, MCU_CMD(PATCH_SEM_CONTROL),
 				 &req, sizeof(req), true);
@@ -2971,6 +3011,10 @@ mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
 {
 	int i, offset = 0, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
 	u32 override = 0, option = 0;
+	int ret;
+
+	if (is_mt7932(dev))
+		max_len = 2048;
 
 	for (i = 0; i < hdr->n_region; i++) {
 		const struct mt76_connac2_fw_region *region;
@@ -3012,7 +3056,29 @@ next:
 	if (is_wa)
 		option |= FW_START_WORKING_PDA_CR4;
 
-	return mt76_connac_mcu_start_firmware(dev, override, option);
+	if (is_mt7932(dev)) {
+		ret = mt7932_sec_protect_fwdl(dev, true);
+		if (ret)
+			return ret;
+	}
+
+	ret = mt76_connac_mcu_start_firmware(dev, override, option);
+
+	if (is_mt7932(dev)) {
+		int release_ret;
+
+		if (ret == -ETIMEDOUT) {
+			dev_warn(dev->dev,
+				 "J700_MT7932_FW_START_RESPONSE_TIMEOUT: release skipped\n");
+			return ret;
+		}
+
+		release_ret = mt7932_sec_protect_fwdl(dev, false);
+		if (!ret)
+			ret = release_ret;
+	}
+
+	return ret;
 }
 
 int mt76_connac2_load_ram(struct mt76_dev *dev, const char *fw_wm,
@@ -3116,12 +3182,23 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 	const struct mt76_connac2_patch_hdr *hdr;
 	const struct firmware *fw = NULL;
 
+	if (is_mt7932(dev))
+		max_len = 2048;
+
 	sem = mt76_connac_mcu_patch_sem_ctrl(dev, true);
 	switch (sem) {
 	case PATCH_IS_DL:
 		return 0;
 	case PATCH_NOT_DL_SEM_SUCCESS:
 		break;
+	case PATCH_REL_SEM_SUCCESS:
+		if (is_mt7932(dev)) {
+			dev_info(dev->dev,
+				 "J700_MT7932_PATCH_SEMAPHORE_ACCEPT: status=%d action=download\n",
+				 sem);
+			break;
+		}
+		fallthrough;
 	default:
 		dev_err(dev->dev, "Failed to get patch semaphore\n");
 		return -EAGAIN;
@@ -3183,6 +3260,14 @@ out:
 	switch (sem) {
 	case PATCH_REL_SEM_SUCCESS:
 		break;
+	case PATCH_REL_SEM_SUCCESS_MT7932:
+		if (is_mt7932(dev)) {
+			dev_info(dev->dev,
+				 "J700_MT7932_PATCH_SEMAPHORE_RELEASE_ACCEPT: status=%d\n",
+				 sem);
+			break;
+		}
+		fallthrough;
 	default:
 		ret = -EAGAIN;
 		dev_err(dev->dev, "Failed to release patch semaphore\n");
@@ -3199,6 +3284,7 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 				  int cmd, int *wait_seq)
 {
 	int txd_len, mcu_cmd = FIELD_GET(__MCU_CMD_FIELD_ID, cmd);
+	bool mt7932 = is_mt7932(dev);
 	struct mt76_connac2_mcu_uni_txd *uni_txd;
 	struct mt76_connac2_mcu_txd *mcu_txd;
 	__le32 *txd;
@@ -3219,12 +3305,14 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 	txd = (__le32 *)skb_push(skb, txd_len);
 
 	val = FIELD_PREP(MT_TXD0_TX_BYTES, skb->len) |
-	      FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD) |
-	      FIELD_PREP(MT_TXD0_Q_IDX, MT_TX_MCU_PORT_RX_Q0);
+	      FIELD_PREP(MT_TXD0_PKT_FMT, MT_TX_TYPE_CMD);
+	if (!mt7932)
+		val |= FIELD_PREP(MT_TXD0_Q_IDX, MT_TX_MCU_PORT_RX_Q0);
 	txd[0] = cpu_to_le32(val);
 
-	val = MT_TXD1_LONG_FORMAT |
-	      FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD);
+	val = FIELD_PREP(MT_TXD1_HDR_FORMAT, MT_HDR_FORMAT_CMD);
+	if (!mt7932)
+		val |= MT_TXD1_LONG_FORMAT;
 	txd[1] = cpu_to_le32(val);
 
 	if (cmd & __MCU_CMD_FIELD_UNI) {
@@ -3241,8 +3329,9 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 
 	mcu_txd = (struct mt76_connac2_mcu_txd *)txd;
 	mcu_txd->len = cpu_to_le16(skb->len - sizeof(mcu_txd->txd));
-	mcu_txd->pq_id = cpu_to_le16(MCU_PQ_ID(MT_TX_PORT_IDX_MCU,
-					       MT_TX_MCU_PORT_RX_Q0));
+	if (!mt7932)
+		mcu_txd->pq_id = cpu_to_le16(MCU_PQ_ID(MT_TX_PORT_IDX_MCU,
+						       MT_TX_MCU_PORT_RX_Q0));
 	mcu_txd->pkt_type = MCU_PKT_ID;
 	mcu_txd->seq = seq;
 	mcu_txd->cid = mcu_cmd;
@@ -3254,6 +3343,8 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 		else
 			mcu_txd->set_query = MCU_Q_SET;
 		mcu_txd->ext_cid_ack = !!mcu_txd->ext_cid;
+	} else if (mt7932 && mcu_cmd == MCU_CMD_ONE_TIME_CAL) {
+		mcu_txd->set_query = MCU_Q_SET;
 	} else {
 		mcu_txd->set_query = MCU_Q_NA;
 	}
@@ -3262,6 +3353,17 @@ int mt76_connac2_mcu_fill_message(struct mt76_dev *dev, struct sk_buff *skb,
 		mcu_txd->s2d_index = MCU_S2D_H2C;
 	else
 		mcu_txd->s2d_index = MCU_S2D_H2N;
+
+	if (mt7932 && (cmd == MCU_CMD(PATCH_SEM_CONTROL) ||
+		       cmd == MCU_CMD(FW_START_REQ)))
+		dev_info(dev->dev,
+			 "J700_MT7932_INIT_TXD: cmd=0x%02x txd0=0x%08x txd1=0x%08x pq_id=0x%04x len=%u cid=0x%02x pkt=%u query=%u seq=%u s2d=%u\n",
+			 mcu_cmd,
+			 le32_to_cpu(txd[0]), le32_to_cpu(txd[1]),
+			 le16_to_cpu(mcu_txd->pq_id),
+			 le16_to_cpu(mcu_txd->len), mcu_txd->cid,
+			 mcu_txd->pkt_type, mcu_txd->set_query,
+			 mcu_txd->seq, mcu_txd->s2d_index);
 
 exit:
 	if (wait_seq)

@@ -250,6 +250,12 @@ void mt76_connac_txp_skb_unmap(struct mt76_dev *dev,
 {
 	struct mt76_connac_txp_common *txp;
 
+	/* J700 MT7932 data buffers live in permanent descriptor-indexed
+	 * coherent storage established before patch completion.
+	 */
+	if (is_mt7932(dev))
+		return;
+
 	txp = mt76_connac_txwi_to_txp(dev, t);
 	if (is_mt76_fw_txp(dev))
 		mt76_connac_txp_skb_unmap_fw(dev, &txp->fw);

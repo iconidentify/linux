@@ -3,6 +3,7 @@
 
 #include <linux/fs.h>
 #include <linux/firmware.h>
+#include <linux/unaligned.h>
 #include "mt7921.h"
 #include "mcu.h"
 #include "../mt76_connac2_mac.h"
@@ -38,6 +39,19 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 	    cmd == MCU_CMD(PATCH_FINISH_REQ)) {
 		skb_pull(skb, sizeof(*rxd) - 4);
 		ret = *skb->data;
+		if (is_mt7932(mdev) && cmd == MCU_CMD(PATCH_SEM_CONTROL))
+			dev_info(mdev->dev,
+				 "J700_MT7932_PATCH_SEMAPHORE_RESPONSE: eid=%u seq=%u option=%u status=%d\n",
+				 rxd->eid, rxd->seq, rxd->option, ret);
+		else if (is_mt7932(mdev) && cmd == MCU_CMD(PATCH_FINISH_REQ))
+			dev_info(mdev->dev,
+				 "J700_MT7932_PATCH_FINISH_RESPONSE: eid=%u seq=%u option=%u status=%d\n",
+				 rxd->eid, rxd->seq, rxd->option, ret);
+		if (is_mt7932(mdev) && cmd == MCU_CMD(PATCH_FINISH_REQ) && ret == 1) {
+			dev_info(mdev->dev,
+				 "J700_MT7932_PATCH_FINISH_ACCEPT: status=1 apple_semantics=success\n");
+			ret = 0;
+		}
 	} else if (cmd == MCU_EXT_CMD(THERMAL_CTRL)) {
 		skb_pull(skb, sizeof(*rxd) + 4);
 		ret = le32_to_cpu(*(__le32 *)skb->data);
@@ -637,21 +651,47 @@ int mt7921_mcu_fw_log_2_host(struct mt792x_dev *dev, u8 ctrl)
 int mt7921_run_firmware(struct mt792x_dev *dev)
 {
 	int err;
+	bool mt7932 = is_mt7932(&dev->mt76);
 
 	err = mt792x_load_firmware(dev);
 	if (err)
 		return err;
 
 	err = mt7921_mcu_get_nic_capability(&dev->phy);
-	if (err)
+	if (err) {
+		if (mt7932)
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=nic-capability ret=%d\n",
+				err);
 		return err;
+	}
+	if (mt7932)
+		dev_info(dev->mt76.dev, "J700_MT7932_NIC_CAPABILITY_PASS\n");
 
 	err = mt7921_load_clc(dev, mt792x_ram_name(dev));
-	if (err)
+	if (err) {
+		if (mt7932)
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=clc ret=%d\n",
+				err);
 		return err;
+	}
+	if (mt7932)
+		dev_info(dev->mt76.dev, "J700_MT7932_CLC_PASS\n");
 	set_bit(MT76_STATE_MCU_RUNNING, &dev->mphy.state);
 
-	return mt7921_mcu_fw_log_2_host(dev, 1);
+	err = mt7921_mcu_fw_log_2_host(dev, 1);
+	if (mt7932) {
+		if (err)
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=fw-log ret=%d\n",
+				err);
+		else
+			dev_info(dev->mt76.dev,
+				 "J700_MT7932_FIRMWARE_GATE_PASS: patch=accepted ram=started n9=ready mcu=responsive\n");
+	}
+
+	return err;
 }
 EXPORT_SYMBOL_GPL(mt7921_run_firmware);
 
@@ -934,6 +974,208 @@ int mt7921_mcu_set_eeprom(struct mt792x_dev *dev)
 				 &req, sizeof(req), true);
 }
 EXPORT_SYMBOL_GPL(mt7921_mcu_set_eeprom);
+
+int mt7932_mcu_load_wcal(struct mt792x_dev *dev)
+{
+	struct mt7932_wcal_req {
+		u8 buffer_mode;
+		u8 format;
+		__le16 len;
+		u8 data[];
+	} __packed;
+	struct mt7932_wcal_req *req;
+	const struct firmware *firmware;
+	size_t request_size;
+	int cmd = MCU_EXT_CMD(EFUSE_BUFFER_MODE);
+	int ret;
+
+	if (!is_mt7932(&dev->mt76))
+		return -EOPNOTSUPP;
+
+	ret = request_firmware(&firmware, MT7932_WCAL, dev->mt76.dev);
+	if (ret)
+		return ret;
+	if (!firmware->size || firmware->size > 1024) {
+		ret = -EINVAL;
+		goto release_firmware;
+	}
+
+	request_size = sizeof(*req) + firmware->size;
+	req = kzalloc(request_size, GFP_KERNEL);
+	if (!req) {
+		ret = -ENOMEM;
+		goto release_firmware;
+	}
+	req->buffer_mode = 3;
+	req->format = 0;
+	req->len = cpu_to_le16(firmware->size);
+	memcpy(req->data, firmware->data, firmware->size);
+
+	ret = mt76_mcu_send_msg(&dev->mt76, cmd, req, request_size, true);
+	if (!ret)
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_WCAL_PASS: cid=ed ext=21 mode=3 format=0 bytes=%zu rf_enabled=0\n",
+			 firmware->size);
+	kfree(req);
+
+release_firmware:
+	release_firmware(firmware);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt7932_mcu_load_wcal);
+
+#define MT7932_CAL_STREAM_VERSION	1
+#define MT7932_CAL_STREAM_RECORD_MAX	4096
+#define MT7932_CAL_WIRE_HEADER_SIZE	20
+#define MT7932_CAL_WIRE_DATA_MAX		1080
+
+struct mt7932_cal_stream_header {
+	u8 magic[8];
+	__le16 version;
+	__le16 records;
+	__le32 size;
+} __packed;
+
+struct mt7932_cal_sequence {
+	bool seen;
+	u8 type;
+	u8 block_current;
+	u8 block_total;
+	u32 cal_param;
+};
+
+static int mt7932_validate_cal_record(const u8 *record, size_t length,
+				      struct mt7932_cal_sequence *sequence)
+{
+	u32 data_length, cache_mark, temperature, cal_param;
+	u8 type, block_current, block_total;
+
+	if (length <= MT7932_CAL_WIRE_HEADER_SIZE ||
+	    length > MT7932_CAL_WIRE_HEADER_SIZE + MT7932_CAL_WIRE_DATA_MAX)
+		return -EINVAL;
+	type = record[0];
+	block_current = record[2] & 0xf;
+	block_total = record[2] >> 4;
+	if (type > 3 || record[1] ||
+	    !block_total || block_current >= block_total)
+		return -EINVAL;
+
+	data_length = get_unaligned_le32(record + 4);
+	if (data_length != length - MT7932_CAL_WIRE_HEADER_SIZE)
+		return -EINVAL;
+	cache_mark = get_unaligned_le32(record + 12);
+	temperature = get_unaligned_le32(record + 16);
+	if (type < 2 && (cache_mark || temperature))
+		return -EINVAL;
+	cal_param = get_unaligned_le32(record + 8);
+
+	if (!sequence->seen || type != sequence->type ||
+	    cal_param != sequence->cal_param) {
+		if (sequence->seen &&
+		    (sequence->block_current + 1 != sequence->block_total ||
+		     type < sequence->type || type > sequence->type + 1 ||
+		     (type == sequence->type &&
+		      cal_param <= sequence->cal_param)))
+			return -EINVAL;
+		if ((!sequence->seen && type != 0) || block_current)
+			return -EINVAL;
+	} else {
+		if (block_total != sequence->block_total ||
+		    block_current != sequence->block_current + 1)
+			return -EINVAL;
+	}
+
+	sequence->seen = true;
+	sequence->type = type;
+	sequence->block_current = block_current;
+	sequence->block_total = block_total;
+	sequence->cal_param = cal_param;
+	return 0;
+}
+
+static int mt7932_validate_cal_stream(const struct firmware *fw, u16 *countp)
+{
+	static const u8 magic[8] = { 'J', '7', 'C', 'A', 'L', 'D', '6', 0 };
+	const struct mt7932_cal_stream_header *header;
+	struct mt7932_cal_sequence sequence = {};
+	size_t offset;
+	u16 count, i;
+	int ret;
+
+	if (fw->size < sizeof(*header))
+		return -EINVAL;
+	header = (const void *)fw->data;
+	count = le16_to_cpu(header->records);
+	if (memcmp(header->magic, magic, sizeof(magic)) ||
+	    le16_to_cpu(header->version) != MT7932_CAL_STREAM_VERSION ||
+	    !count || count > MT7932_CAL_STREAM_RECORD_MAX ||
+	    le32_to_cpu(header->size) != fw->size)
+		return -EINVAL;
+
+	offset = sizeof(*header);
+	for (i = 0; i < count; i++) {
+		u16 length, reserved;
+
+		if (offset + 4 > fw->size)
+			return -EINVAL;
+		length = get_unaligned_le16(fw->data + offset);
+		reserved = get_unaligned_le16(fw->data + offset + 2);
+		offset += 4;
+		if (reserved || length > fw->size - offset)
+			return -EINVAL;
+		ret = mt7932_validate_cal_record(fw->data + offset, length,
+						 &sequence);
+		if (ret)
+			return ret;
+		offset += length;
+	}
+	if (offset != fw->size || !sequence.seen ||
+	    sequence.block_current + 1 != sequence.block_total)
+		return -EINVAL;
+	*countp = count;
+	return 0;
+}
+
+int mt7932_mcu_load_one_time_cal(struct mt792x_dev *dev)
+{
+	const struct mt7932_cal_stream_header *header;
+	const struct firmware *firmware;
+	size_t offset;
+	u16 count, i;
+	int cmd = MCU_CMD(ONE_TIME_CAL);
+	int ret;
+
+	if (!is_mt7932(&dev->mt76))
+		return -EOPNOTSUPP;
+	ret = request_firmware(&firmware, MT7932_ONE_TIME_CAL, dev->mt76.dev);
+	if (ret)
+		return ret;
+	ret = mt7932_validate_cal_stream(firmware, &count);
+	if (ret)
+		goto release_firmware;
+
+	header = (const void *)firmware->data;
+	offset = sizeof(*header);
+	for (i = 0; i < count; i++) {
+		const u8 *data;
+		u16 length = get_unaligned_le16(firmware->data + offset);
+
+		offset += 4;
+		data = firmware->data + offset;
+		ret = mt76_mcu_send_msg(&dev->mt76, cmd, data, length, false);
+		if (ret)
+			goto release_firmware;
+		offset += length;
+	}
+	dev_info(dev->mt76.dev,
+		 "J700_MT7932_ONE_TIME_CAL_PASS: cid=d6 records=%u wire_header=20 data_max=1080 rf_enabled=0\n",
+		 count);
+
+release_firmware:
+	release_firmware(firmware);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(mt7932_mcu_load_one_time_cal);
 
 int mt7921_mcu_uni_bss_ps(struct mt792x_dev *dev, struct ieee80211_vif *vif)
 {

@@ -17,7 +17,7 @@ echo "/* Generated file - do not edit */"
 echo ""
 
 grep -E '^#define HWCAP[0-9]*_[A-Z0-9_]+' $1 | \
-	sed 's/.*HWCAP\([0-9]*\)_\([A-Z0-9_]\+\).*/#define KERNEL_HWCAP_\2\t__khwcap\1_feature(\2)/'
+	sed 's/.*HWCAP\([0-9]*\)_\([A-Z0-9_][A-Z0-9_]*\).*/#define KERNEL_HWCAP_\2\t__khwcap\1_feature(\2)/'
 
 echo ""
 echo "#endif /* __ASM_KERNEL_HWCAPS_H */"

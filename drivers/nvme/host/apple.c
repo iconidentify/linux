@@ -177,7 +177,8 @@ struct apple_nvme_iod {
 
 struct apple_nvme_hw {
 	bool has_lsq_nvmmu;
-	bool has_legacy_lsq_ctrl;
+	bool has_linear_sq_ctrl;
+	bool has_prp_null_ctrl;
 	bool has_queue_count;
 	bool has_separate_nvmmu;
 	bool needs_ioq_registers;
@@ -1336,9 +1337,24 @@ rtkit_ready:
 		 * Enable NVMMU and linear submission queues which is required
 		 * since T6000.
 		 */
-		if (anv->hw->has_legacy_lsq_ctrl)
+		if (anv->hw->has_linear_sq_ctrl) {
+			u32 lsq_ctrl;
+
 			writel(APPLE_ANS_LINEAR_SQ_EN,
 				anv->mmio_nvme + APPLE_ANS_LINEAR_SQ_CTRL);
+			lsq_ctrl = readl(anv->mmio_nvme + APPLE_ANS_LINEAR_SQ_CTRL);
+			if (!(lsq_ctrl & APPLE_ANS_LINEAR_SQ_EN)) {
+				dev_err(anv->dev,
+					"failed to enable linear submission queues: LSQ_CTRL=0x%08x\n",
+					lsq_ctrl);
+				ret = -EIO;
+				goto out;
+			}
+			if (anv->hw->needs_ioq_registers)
+				dev_info(anv->dev,
+					 "post-M4 linear submission queues enabled: LSQ_CTRL=0x%08x\n",
+					 lsq_ctrl);
+		}
 
 		/*
 		 * The legacy register takes queue entry counts. On post-M4
@@ -1374,7 +1390,7 @@ rtkit_ready:
 		 * "completed with err BAD_CMD-" or a "NULL_PRP_PTR_ERR" in the
 		 * syslog
 		 */
-		if (anv->hw->has_legacy_lsq_ctrl)
+		if (anv->hw->has_prp_null_ctrl)
 			writel(readl(anv->mmio_nvme + APPLE_ANS_UNKNOWN_CTRL) &
 				~APPLE_ANS_PRP_NULL_CHECK,
 				anv->mmio_nvme + APPLE_ANS_UNKNOWN_CTRL);
@@ -2019,13 +2035,15 @@ static const struct apple_nvme_hw apple_nvme_t8015_hw = {
 
 static const struct apple_nvme_hw apple_nvme_t8103_hw = {
 	.has_lsq_nvmmu = true,
-	.has_legacy_lsq_ctrl = true,
+	.has_linear_sq_ctrl = true,
+	.has_prp_null_ctrl = true,
 	.has_queue_count = true,
 	.max_queue_depth = 64,
 };
 
 static const struct apple_nvme_hw apple_nvme_t8132_hw = {
 	.has_lsq_nvmmu = true,
+	.has_linear_sq_ctrl = true,
 	.has_separate_nvmmu = true,
 	.needs_ioq_registers = true,
 	.max_queue_depth = 64,

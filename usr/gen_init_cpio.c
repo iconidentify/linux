@@ -14,6 +14,32 @@
 #include <ctype.h>
 #include <limits.h>
 
+#ifdef __APPLE__
+/*
+ * Host-build shims for macOS.
+ *
+ * copy_file_range() is a Linux syscall with no Darwin equivalent. It is used
+ * here purely as a fast path -- the code immediately below it falls back to a
+ * read/write loop on a short or failed copy -- so reporting "not supported" is
+ * behaviourally correct rather than a stub that silently truncates.
+ *
+ * O_LARGEFILE is meaningless on a platform whose off_t is always 64-bit.
+ */
+#include <errno.h>
+#ifndef O_LARGEFILE
+#define O_LARGEFILE 0
+#endif
+static inline ssize_t copy_file_range(int fd_in, void *off_in, int fd_out,
+				      void *off_out, size_t len,
+				      unsigned int flags)
+{
+	(void)fd_in; (void)off_in; (void)fd_out; (void)off_out;
+	(void)len; (void)flags;
+	errno = ENOSYS;
+	return -1;
+}
+#endif
+
 /*
  * Original work by Jeff Garzik
  *

@@ -613,6 +613,36 @@ void mt76_unregister_phy(struct mt76_phy *phy)
 }
 EXPORT_SYMBOL_GPL(mt76_unregister_phy);
 
+static int mt76_page_pool_prewarm(struct mt76_queue *q, int count)
+{
+	struct page **page;
+	int i, ret = 0;
+
+	page = kcalloc(count, sizeof(*page), GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
+
+	for (i = 0; i < count; i++) {
+		page[i] = page_pool_alloc_pages(q->page_pool,
+						GFP_KERNEL | __GFP_NOWARN |
+						GFP_DMA32);
+		if (!page[i]) {
+			ret = -ENOMEM;
+			break;
+		}
+	}
+	while (i--)
+		page_pool_recycle_direct(q->page_pool, page[i]);
+	kfree(page);
+
+	if (!ret)
+		dev_info(q->dev->dev,
+			 "J700_MT7932_RX_POOL_PREWARM_PASS: hw=%u ring=%d pages=%d reserve=%d\n",
+			 q->hw_idx, q->ndesc, count, count - q->ndesc);
+
+	return ret;
+}
+
 int mt76_create_page_pool(struct mt76_dev *dev, struct mt76_queue *q)
 {
 	bool is_qrx = mt76_queue_is_rx(dev, q);
@@ -640,6 +670,13 @@ int mt76_create_page_pool(struct mt76_dev *dev, struct mt76_queue *q)
 		pp_params.pool_size = 16;
 		break;
 	}
+	if (mt76_chip(dev) == 0x7932 && mt76_is_mmio(dev)) {
+		/* Initial queue fill consumes q->ndesc mapped pages.  Keep the
+		 * normal page-pool allowance as an already-mapped replacement
+		 * reserve so the first post-firmware skb cannot grow the DART map.
+		 */
+		pp_params.pool_size += q->ndesc;
+	}
 
 	if (mt76_is_mmio(dev)) {
 		/* rely on page_pool for DMA mapping */
@@ -658,6 +695,15 @@ int mt76_create_page_pool(struct mt76_dev *dev, struct mt76_queue *q)
 
 		q->page_pool = NULL;
 		return err;
+	}
+	if (mt76_chip(dev) == 0x7932 && mt76_is_mmio(dev)) {
+		int err = mt76_page_pool_prewarm(q, pp_params.pool_size);
+
+		if (err) {
+			page_pool_destroy(q->page_pool);
+			q->page_pool = NULL;
+			return err;
+		}
 	}
 
 	return 0;

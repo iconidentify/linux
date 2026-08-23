@@ -47,6 +47,75 @@
 	};
 };
 
+/*
+ * Phase-1 wireless inventory only.  The exact register windows, IRQs, port
+ * count, MSI range and PERST GPIO come from the live J700 ADT captured as
+ * neo-bringup/build/j700-live-adt.bin (SHA-256 f117dd865b13ce90336e5a070b333ea45b1620320be576260c0e36d5f24a2e3c).
+ * m1n1 has already initialized port 0 and left its link up before Linux.
+ * Describe only the generic host bridge here: no bogus Broadcom compatible,
+ * no endpoint node, and no IOMMU RID/SID map until PCI enumeration proves the
+ * two real functions and Phase 2 authorizes DMA.
+ */
+&soc {
+	pcie0_dart: iommu@390000000 {
+		compatible = "apple,t8140-dart", "apple,t8110-dart";
+		reg = <0x3 0x90000000 0x0 0x20000>;
+		#iommu-cells = <1>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1206 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	pcie0: pcie@1cb0000000 {
+		compatible = "apple,t8140-pcie", "apple,t6020-pcie";
+		device_type = "pci";
+
+		reg = <0x1c 0xb0000000 0x0 0x10000000>, /* ECAM */
+		      <0x3 0x94000000 0x0 0x4000>,     /* RC */
+		      <0x3 0x90028000 0x0 0x8000>,     /* port 0 */
+		      <0x3 0x97020000 0x0 0x4000>;     /* port 0 PHY */
+		reg-names = "config", "rc", "port0", "phy0";
+
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1205 IRQ_TYPE_LEVEL_HIGH>;
+
+		msi-controller;
+		msi-parent = <&pcie0>;
+		msi-ranges = <&aic AIC_IRQ 1331 IRQ_TYPE_EDGE_RISING 32>;
+
+		bus-range = <0 8>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges = <0x43000000 0xb 0xc0000000 0xb 0xc0000000 0x0 0x20000000>,
+			 <0x02000000 0x0 0x80000000 0xb 0x80000000 0x0 0x40000000>;
+
+		port00: pci@0,0 {
+			device_type = "pci";
+			reg = <0x0 0x0 0x0 0x0 0x0>;
+			reset-gpios = <&pinctrl_ap 114 GPIO_ACTIVE_LOW>;
+			/*
+			 * Live J700 ADT function-reg_on is
+			 * pKW8("pcIO", 0x800000, 0x80000).  Aurora IRC
+			 * 92012-92014 records the hardware pass through the existing
+			 * macsmc-gpio provider as pin 8.
+			 */
+			pwren-gpios = <&smc_gpio 8 GPIO_ACTIVE_HIGH>;
+			maximum-link-speed = <2>;
+
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges;
+
+			interrupt-controller;
+			#interrupt-cells = <1>;
+			interrupt-map-mask = <0 0 0 7>;
+			interrupt-map = <0 0 0 1 &port00 0 0 0 0>,
+					<0 0 0 2 &port00 0 0 0 1>,
+					<0 0 0 3 &port00 0 0 0 2>,
+					<0 0 0 4 &port00 0 0 0 3>;
+		};
+	};
+};
+
 &serial0 {
 	status = "okay";
 };

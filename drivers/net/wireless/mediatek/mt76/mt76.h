@@ -240,6 +240,10 @@ struct mt76_queue {
 	struct mt76_queue_entry *entry;
 	struct mt76_rro_desc *rro_desc;
 	struct mt76_desc *desc;
+	void *tx_bounce_buf;
+	dma_addr_t tx_bounce_dma;
+	u32 tx_bounce_stride;
+	u32 tx_bounce_entries;
 
 	u16 first;
 	u16 head;
@@ -250,6 +254,7 @@ struct mt76_queue {
 	int queued;
 	int buf_size;
 	bool stopped;
+	bool tx_bounce_logged;
 	bool blocked;
 
 	u8 buf_offset;

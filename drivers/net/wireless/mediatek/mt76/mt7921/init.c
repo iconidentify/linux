@@ -10,6 +10,16 @@
 #include "../mt76_connac2_mac.h"
 #include "mcu.h"
 
+static bool mt7932_load_wcal;
+module_param_named(load_wcal, mt7932_load_wcal, bool, 0444);
+MODULE_PARM_DESC(load_wcal,
+		 "load J700 MT7932 FDR WCAL before MAC initialization");
+
+static bool mt7932_load_one_time_cal;
+module_param_named(load_one_time_cal, mt7932_load_one_time_cal, bool, 0444);
+MODULE_PARM_DESC(load_one_time_cal,
+		 "load host-converted J700 MT7932 OCA/IFCAL before MAC initialization");
+
 static ssize_t mt7921_thermal_temp_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
@@ -190,14 +200,55 @@ static int __mt7921_init_hardware(struct mt792x_dev *dev)
 		goto out;
 
 	ret = mt76_eeprom_override(&dev->mphy);
-	if (ret)
+	if (ret) {
+		if (is_mt7932(&dev->mt76))
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=eeprom-override ret=%d\n",
+				ret);
 		goto out;
+	}
 
 	ret = mt7921_mcu_set_eeprom(dev);
-	if (ret)
+	if (ret) {
+		if (is_mt7932(&dev->mt76))
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=efuse-mode ret=%d\n",
+				ret);
 		goto out;
+	}
+	if (is_mt7932(&dev->mt76))
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_EFUSE_MODE_PASS: source=on-chip external-buffer-hook=disabled-in-25G83\n");
+	if (is_mt7932(&dev->mt76) && mt7932_load_wcal) {
+		ret = mt7932_mcu_load_wcal(dev);
+		if (ret) {
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=wcal ret=%d\n",
+				ret);
+			goto out;
+		}
+	}
+	if (is_mt7932(&dev->mt76) && mt7932_load_one_time_cal) {
+		if (!mt7932_load_wcal) {
+			ret = -EINVAL;
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=one-time-cal-prerequisite require_wcal=1\n");
+			goto out;
+		}
+		ret = mt7932_mcu_load_one_time_cal(dev);
+		if (ret) {
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=one-time-cal ret=%d\n",
+				ret);
+			goto out;
+		}
+	}
 
 	ret = mt7921_mac_init(dev);
+	if (ret && is_mt7932(&dev->mt76))
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FIRMWARE_GATE_FAIL: stage=mac-init ret=%d\n",
+			ret);
 out:
 	return ret;
 }
@@ -205,21 +256,30 @@ out:
 static int mt7921_init_hardware(struct mt792x_dev *dev)
 {
 	int ret, i;
+	int attempts = is_mt7932(&dev->mt76) ? 1 : MT792x_MCU_INIT_RETRY_COUNT;
 
 	set_bit(MT76_STATE_INITIALIZED, &dev->mphy.state);
 
-	for (i = 0; i < MT792x_MCU_INIT_RETRY_COUNT; i++) {
+	for (i = 0; i < attempts; i++) {
 		ret = __mt7921_init_hardware(dev);
 		if (!ret)
 			break;
 
-		mt792x_init_reset(dev);
+		if (i + 1 < attempts)
+			mt792x_init_reset(dev);
 	}
 
-	if (i == MT792x_MCU_INIT_RETRY_COUNT) {
+	if (i == attempts) {
 		dev_err(dev->mt76.dev, "hardware init failed\n");
+		if (is_mt7932(&dev->mt76))
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=hardware-init ret=%d attempts=1\n",
+				ret);
 		return ret;
 	}
+	if (is_mt7932(&dev->mt76))
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_HARDWARE_INIT_PASS: attempts=1\n");
 
 	return 0;
 }
@@ -244,6 +304,10 @@ static void mt7921_init_work(struct work_struct *work)
 		dev_err(dev->mt76.dev, "register device failed\n");
 		return;
 	}
+	if (is_mt7932(&dev->mt76))
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_NETWORK_REGISTER_PASS: firmware=%s\n",
+			 dev->mt76.hw->wiphy->fw_version);
 
 	ret = mt7921_init_debugfs(dev);
 	if (ret) {
@@ -304,12 +368,16 @@ int mt7921_register_device(struct mt792x_dev *dev)
 	dev->pm.stats.last_doze_event = jiffies;
 
 	if (!mt76_is_usb(&dev->mt76) &&
-	    !is_mt7902(&dev->mt76)) {
+	    !is_mt7902(&dev->mt76) &&
+	    !is_mt7932(&dev->mt76)) {
 		dev->pm.enable_user = true;
 		dev->pm.enable = true;
 		dev->pm.ds_enable_user = true;
 		dev->pm.ds_enable = true;
 	}
+	if (is_mt7932(&dev->mt76))
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_PM_GUARD: runtime-pm=off deep-sleep=off\n");
 
 	if (!mt76_is_mmio(&dev->mt76))
 		hw->extra_tx_headroom += MT_SDIO_TXD_SIZE + MT_SDIO_HDR_SIZE;
@@ -337,7 +405,7 @@ int mt7921_register_device(struct mt792x_dev *dev)
 			IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE |
 			IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE |
 			(3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT);
-	if (is_mt7922(&dev->mt76))
+	if (is_mt7922_class(&dev->mt76))
 		dev->mphy.sband_5g.sband.vht_cap.cap |=
 			IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ |
 			IEEE80211_VHT_CAP_SHORT_GI_160;
