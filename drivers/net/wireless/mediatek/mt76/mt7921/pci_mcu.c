@@ -103,7 +103,7 @@ mt7932_mcu_ring_trace(struct mt792x_dev *dev, struct mt76_queue *q,
 	/* The direct platform snapshot is safe only during first contact.  Once
 	 * patch-finish changes firmware ownership, the same DART window can gate.
 	 */
-	if (!strcmp(phase, "after-10ms") && q->head == 2)
+	if (!strcmp(phase, "after-10ms") && q->head == 1)
 		mt7932_dma_path_trace(dev, q, desc);
 }
 
