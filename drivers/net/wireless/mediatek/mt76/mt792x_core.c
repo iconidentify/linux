@@ -927,6 +927,7 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 	int ret;
 	bool mt7932 = is_mt7932(&dev->mt76);
 	u8 otp[64] = {};
+	u8 otp_mode = 0, otp_format = 0;
 	int i;
 
 	mt76_connac_mcu_restart(&dev->mt76);
@@ -951,6 +952,15 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 	if (mt7932)
 		dev_info(dev->mt76.dev, "J700_MT7932_PATCH_UPLOAD_PASS\n");
 	if (mt7932) {
+		ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x7a, &otp_mode);
+		if (ret)
+			return ret;
+		ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x164, &otp_format);
+		if (ret)
+			return ret;
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_OTP_PREAMBLE_PASS: addr007a=0x%02x addr0164=0x%02x\n",
+			 otp_mode, otp_format);
 		ret = mt76_connac_mcu_read_otp(&dev->mt76, 0x200, &otp[0]);
 		if (ret) {
 			dev_err(dev->mt76.dev,
