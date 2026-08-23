@@ -7,6 +7,68 @@
 #include "mt792x.h"
 #include "dma.h"
 
+#define MT7932_MCU_SHARE_IPC_SIZE	0x300
+#define MT7932_MCU_SHARE_AUX_SIZE	0x320
+#define MT7932_MCU_SHARE_IPC_ADDR	0x7c053a30
+#define MT7932_MCU_SHARE_FLAGS		0x7c053a38
+#define MT7932_MCU_SHARE_SIZE		0x7c053a3c
+#define MT7932_MCU_SHARE_AUX_ADDR	0x7c053a50
+#define MT7932_MCU_SHARE_ENABLE		0x7c053c28
+
+static int mt7932_mcu_share_info_init(struct mt792x_dev *dev)
+{
+	struct device *dma_dev = dev->mt76.dma_dev;
+	u32 enable, flags, size, ipc_addr, aux_addr;
+
+	if (!dev->mt7932_ipc_buf) {
+		dev->mt7932_ipc_buf = dmam_alloc_coherent(dma_dev,
+						 MT7932_MCU_SHARE_IPC_SIZE,
+						 &dev->mt7932_ipc_dma,
+						 GFP_KERNEL);
+		if (!dev->mt7932_ipc_buf)
+			return -ENOMEM;
+	}
+	if (!dev->mt7932_aux_buf) {
+		dev->mt7932_aux_buf = dmam_alloc_coherent(dma_dev,
+						 MT7932_MCU_SHARE_AUX_SIZE,
+						 &dev->mt7932_aux_dma,
+						 GFP_KERNEL);
+		if (!dev->mt7932_aux_buf)
+			return -ENOMEM;
+	}
+	if (upper_32_bits(dev->mt7932_ipc_dma) ||
+	    upper_32_bits(dev->mt7932_aux_dma))
+		return -ERANGE;
+
+	memset(dev->mt7932_ipc_buf, 0, MT7932_MCU_SHARE_IPC_SIZE);
+	memset(dev->mt7932_aux_buf, 0, MT7932_MCU_SHARE_AUX_SIZE);
+	dma_wmb();
+
+	mt76_wr(dev, MT7932_MCU_SHARE_ENABLE, 1);
+	mt76_wr(dev, MT7932_MCU_SHARE_FLAGS, 2);
+	mt76_wr(dev, MT7932_MCU_SHARE_SIZE, MT7932_MCU_SHARE_IPC_SIZE);
+	mt76_wr(dev, MT7932_MCU_SHARE_IPC_ADDR,
+		lower_32_bits(dev->mt7932_ipc_dma));
+	mt76_wr(dev, MT7932_MCU_SHARE_AUX_ADDR,
+		lower_32_bits(dev->mt7932_aux_dma));
+
+	enable = mt76_rr(dev, MT7932_MCU_SHARE_ENABLE);
+	flags = mt76_rr(dev, MT7932_MCU_SHARE_FLAGS);
+	size = mt76_rr(dev, MT7932_MCU_SHARE_SIZE);
+	ipc_addr = mt76_rr(dev, MT7932_MCU_SHARE_IPC_ADDR);
+	aux_addr = mt76_rr(dev, MT7932_MCU_SHARE_AUX_ADDR);
+	if (enable != 1 || flags != 2 || size != MT7932_MCU_SHARE_IPC_SIZE ||
+	    ipc_addr != lower_32_bits(dev->mt7932_ipc_dma) ||
+	    aux_addr != lower_32_bits(dev->mt7932_aux_dma))
+		return -EIO;
+
+	dev_info(dev->mt76.dev,
+		 "J700_MT7932_MCU_SHARE_INFO_PASS: enable=%u flags=%u size=0x%x ipc=0x%08x aux=0x%08x\n",
+		 enable, flags, size, ipc_addr, aux_addr);
+
+	return 0;
+}
+
 static const struct ieee80211_iface_limit if_limits[] = {
 	{
 		.max = MT792x_MAX_INTERFACES,
@@ -940,6 +1002,15 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 			    MT_TOP_MISC2_FW_PWR_ON, 1000))
 		dev_warn(dev->mt76.dev,
 			 "MCU is not ready for firmware download\n");
+	if (mt7932) {
+		ret = mt7932_mcu_share_info_init(dev);
+		if (ret) {
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=mcu-share-info ret=%d\n",
+				ret);
+			return ret;
+		}
+	}
 
 	if (mt7932)
 		dev_info(dev->mt76.dev,

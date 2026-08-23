@@ -265,6 +265,10 @@ struct mt792x_dev {
 	enum environment_cap country_ie_env;
 	u32 backup_l1;
 	u32 backup_l2;
+	void *mt7932_ipc_buf;
+	dma_addr_t mt7932_ipc_dma;
+	void *mt7932_aux_buf;
+	dma_addr_t mt7932_aux_dma;
 
 	struct ieee80211_chanctx_conf *new_ctx;
 };
