@@ -3013,6 +3013,13 @@ mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
 	u32 override = 0, option = 0;
 	int ret;
 
+	if (is_mt7932(dev)) {
+		max_len = 2048;
+		dev_info(dev->dev,
+			 "J700_MT7932_SCATTER_LIMIT: phase=ram bytes=%d\n",
+			 max_len);
+	}
+
 	for (i = 0; i < hdr->n_region; i++) {
 		const struct mt76_connac2_fw_region *region;
 		u32 len, addr, mode;
@@ -3178,6 +3185,13 @@ int mt76_connac2_load_patch(struct mt76_dev *dev, const char *fw_name)
 	int i, ret, sem, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
 	const struct mt76_connac2_patch_hdr *hdr;
 	const struct firmware *fw = NULL;
+
+	if (is_mt7932(dev)) {
+		max_len = 2048;
+		dev_info(dev->dev,
+			 "J700_MT7932_SCATTER_LIMIT: phase=patch bytes=%d\n",
+			 max_len);
+	}
 
 	sem = mt76_connac_mcu_patch_sem_ctrl(dev, true);
 	switch (sem) {
