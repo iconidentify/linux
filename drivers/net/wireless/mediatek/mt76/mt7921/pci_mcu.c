@@ -109,31 +109,6 @@ mt7932_mcu_ring_trace(struct mt792x_dev *dev, struct mt76_queue *q,
 		mt7932_dma_path_trace(dev, q, desc);
 }
 
-static void
-mt7932_fw_start_memory_trace(struct mt792x_dev *dev,
-			     struct mt76_queue *tx, const char *phase)
-{
-	struct mt76_queue *rx = &dev->mt76.q_rx[MT_RXQ_MCU];
-	u16 tx_idx = tx->head ? tx->head - 1 : tx->ndesc - 1;
-	u16 rx_idx = rx->tail;
-	struct mt76_desc *txd = &tx->desc[tx_idx];
-	struct mt76_desc *rxd = &rx->desc[rx_idx];
-
-	dma_rmb();
-	dev_info(dev->mt76.dev,
-		 "J700_MT7932_FW_START_MEMORY: phase=%s hw=%u tx=%u/%u/%d idx=%u desc=%08x/%08x/%08x/%08x rx=%u/%u/%d idx=%u desc=%08x/%08x/%08x/%08x\n",
-		 phase, tx->hw_idx, tx->head, tx->tail, tx->queued, tx_idx,
-		 le32_to_cpu(READ_ONCE(txd->buf0)),
-		 le32_to_cpu(READ_ONCE(txd->buf1)),
-		 le32_to_cpu(READ_ONCE(txd->ctrl)),
-		 le32_to_cpu(READ_ONCE(txd->info)),
-		 rx->head, rx->tail, rx->queued, rx_idx,
-		 le32_to_cpu(READ_ONCE(rxd->buf0)),
-		 le32_to_cpu(READ_ONCE(rxd->buf1)),
-		 le32_to_cpu(READ_ONCE(rxd->ctrl)),
-		 le32_to_cpu(READ_ONCE(rxd->info)));
-}
-
 int mt7921e_driver_own(struct mt792x_dev *dev)
 {
 	u32 reg = mt7921_reg_map_l1(dev, MT_TOP_LPCR_HOST_BAND0);
@@ -180,11 +155,6 @@ mt7921_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 		mt7932_mcu_ring_trace(dev, q, "after-kick");
 		usleep_range(10000, 11000);
 		mt7932_mcu_ring_trace(dev, q, "after-10ms");
-	}
-	if (is_mt7932(mdev) && cmd == MCU_CMD(FW_START_REQ)) {
-		mt7932_fw_start_memory_trace(dev, q, "after-kick");
-		usleep_range(10000, 11000);
-		mt7932_fw_start_memory_trace(dev, q, "after-10ms");
 	}
 
 	return ret;
