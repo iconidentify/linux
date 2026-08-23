@@ -136,6 +136,7 @@ static u32 __mt7921_reg_addr(struct mt792x_dev *dev, u32 addr)
 
 	if ((addr >= 0x18000000 && addr < 0x18c00000) ||
 	    (addr >= 0x70000000 && addr < 0x78000000) ||
+	    (addr >= 0x7c050000 && addr < 0x7c060000) ||
 	    (addr >= 0x7c000000 && addr < 0x7c400000))
 		return mt7921_reg_map_l1(dev, addr);
 
