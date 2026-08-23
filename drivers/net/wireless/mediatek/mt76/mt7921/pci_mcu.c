@@ -177,6 +177,13 @@ int mt7921e_mcu_init(struct mt792x_dev *dev)
 		return err;
 
 	mt76_rmw_field(dev, MT_PCIE_MAC_PM, MT_PCIE_MAC_PM_L0S_DIS, 1);
+	if (is_mt7932(&dev->mt76)) {
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_OWNED_QUIESCE_BEGIN: delay_ms=4000\n");
+		msleep(4000);
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_OWNED_QUIESCE_END: delay_ms=4000\n");
+	}
 
 	err = mt7921_run_firmware(dev);
 	cleanup_q = is_mt7932(&dev->mt76) ? dev->mphy.q_tx[MT_TXQ_BE] :
