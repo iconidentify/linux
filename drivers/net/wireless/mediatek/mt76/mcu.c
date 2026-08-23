@@ -141,8 +141,7 @@ int __mt76_mcu_send_firmware(struct mt76_dev *dev, int cmd, const void *data,
 	struct mt76_queue *q;
 	int err, cur_len;
 
-	q = mt76_chip(dev) == 0x7932 && mt76_is_mmio(dev) ?
-		dev->phy.q_tx[MT_TXQ_BE] : dev->q_mcu[MT_MCUQ_FWDL];
+	q = dev->q_mcu[MT_MCUQ_FWDL];
 
 	while (len > 0) {
 		cur_len = min_t(int, max_len, len);
