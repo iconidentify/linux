@@ -29,7 +29,6 @@
 #include <linux/kasan.h>
 #include <linux/ubsan.h>
 #include <linux/cfi.h>
-#include <linux/apple-dart.h>
 
 #include <asm/atomic.h>
 #include <asm/bug.h>
@@ -937,7 +936,6 @@ void __noreturn arm64_serror_panic(struct pt_regs *regs, unsigned long esr)
 
 	pr_crit("SError Interrupt on CPU%d, code 0x%016lx -- %s\n",
 		smp_processor_id(), esr, esr_get_class_string(esr));
-	apple_dart_dump_apcie_serror();
 	if (regs)
 		__show_regs(regs);
 

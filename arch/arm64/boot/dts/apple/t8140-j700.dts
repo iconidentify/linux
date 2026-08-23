@@ -63,6 +63,7 @@
 		#iommu-cells = <1>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1206 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_apcie_sys_gp>;
 	};
 
 	pcie0: pcie@1cb0000000 {
@@ -81,6 +82,7 @@
 		msi-controller;
 		msi-parent = <&pcie0>;
 		msi-ranges = <&aic AIC_IRQ 1331 IRQ_TYPE_EDGE_RISING 32>;
+		power-domains = <&ps_apcie_sys_gp>;
 
 		bus-range = <0 8>;
 		#address-cells = <3>;
