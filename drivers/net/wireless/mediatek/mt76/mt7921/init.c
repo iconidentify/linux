@@ -6,6 +6,7 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/thermal.h>
 #include <linux/firmware.h>
+#include <linux/delay.h>
 #include "mt7921.h"
 #include "../mt76_connac2_mac.h"
 #include "mcu.h"
@@ -289,6 +290,14 @@ static void mt7921_init_work(struct work_struct *work)
 	struct mt792x_dev *dev = container_of(work, struct mt792x_dev,
 					      init_work);
 	int ret;
+
+	if (is_mt7932(&dev->mt76)) {
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_INIT_QUIESCE_BEGIN: delay_ms=4000\n");
+		msleep(4000);
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_INIT_QUIESCE_END: delay_ms=4000\n");
+	}
 
 	ret = mt7921_init_hardware(dev);
 	if (ret)
