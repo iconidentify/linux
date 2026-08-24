@@ -194,6 +194,8 @@ struct apple_pcie {
 	struct completion	event;
 	struct irq_fwspec	fwspec;
 	u32			nvecs;
+	bool			hide_bdf;
+	u16			hidden_bdf;
 };
 
 struct apple_pcie_port {
@@ -805,6 +807,19 @@ static struct apple_pcie *apple_pcie_lookup(struct device *dev)
 	return pci_host_bridge_priv(dev_get_drvdata(dev));
 }
 
+static void __iomem *apple_pcie_map_bus(struct pci_bus *bus,
+					unsigned int devfn, int where)
+{
+	struct pci_config_window *cfg = bus->sysdata;
+	struct apple_pcie *pcie = apple_pcie_lookup(cfg->parent);
+	u16 bdf = (bus->number << 8) | devfn;
+
+	if (pcie && pcie->hide_bdf && bdf == pcie->hidden_bdf)
+		return NULL;
+
+	return pci_ecam_map_bus(bus, devfn, where);
+}
+
 static struct apple_pcie_port *apple_pcie_get_port(struct pci_dev *pdev)
 {
 	struct pci_config_window *cfg = pdev->sysdata;
@@ -919,7 +934,7 @@ static const struct pci_ecam_ops apple_pcie_cfg_ecam_ops = {
 	.enable_device	= apple_pcie_enable_device,
 	.disable_device	= apple_pcie_disable_device,
 	.pci_ops	= {
-		.map_bus	= pci_ecam_map_bus,
+		.map_bus	= apple_pcie_map_bus,
 		.read		= pci_generic_config_read,
 		.write		= pci_generic_config_write,
 	}
@@ -975,6 +990,24 @@ static int apple_pcie_probe(struct platform_device *pdev)
 	pcie->hw = of_device_get_match_data(dev);
 	if (!pcie->hw)
 		return -ENODEV;
+	{
+		u32 hidden_bdf;
+
+		if (!of_property_read_u32(dev->of_node,
+					  "apple,hide-pci-bdf", &hidden_bdf)) {
+			if (hidden_bdf > U16_MAX)
+				return dev_err_probe(dev, -EINVAL,
+						     "invalid hidden PCI BDF 0x%x\n",
+						     hidden_bdf);
+			pcie->hide_bdf = true;
+			pcie->hidden_bdf = hidden_bdf;
+			dev_info(dev,
+				 "J700_PCIE_HIDE_BDF_ARMED: bus=%02x dev=%02x fn=%u\n",
+				 hidden_bdf >> 8,
+				 PCI_SLOT(hidden_bdf & 0xff),
+				 PCI_FUNC(hidden_bdf & 0xff));
+		}
+	}
 	pcie->base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(pcie->base))
 		return PTR_ERR(pcie->base);
