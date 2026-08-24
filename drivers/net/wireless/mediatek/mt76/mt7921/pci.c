@@ -520,25 +520,9 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	bus_ops->wr = mt7921_wr;
 	bus_ops->rmw = mt7921_rmw;
 	dev->mt76.bus = bus_ops;
-	if (id->device == 0x7932) {
-		u32 cfg48c = 0;
-		int cfg_ret;
-
+	if (id->device == 0x7932)
 		dev_info(mdev->dev,
 			 "J700_MT7932_PROBE_ENTER: pci=14c3:7932 bar0=ready dma_mask=31 diagnostic=1\n");
-		/*
-		 * AppleSunriseWLAN's normal start calls mt7922CheckMCUInInit()
-		 * before driver ownership.  It reads config dword 0x48c and, when
-		 * bits 16:19 remain nonzero, eventually invokes the chip's PCIe FLR
-		 * callback.  Measure that exact gate before deciding whether Linux
-		 * must reproduce the recovery action.
-		 */
-		cfg_ret = pci_read_config_dword(pdev, 0x48c, &cfg48c);
-		dev_info(mdev->dev,
-			 "J700_MT7932_APPLE_MCU_INIT_GATE: ret=%d cfg48c=0x%08x state=0x%x rom=0x%x\n",
-			 cfg_ret, cfg48c, (cfg48c >> 16) & 0xf,
-			 (cfg48c >> 4) & 0x7);
-	}
 
 	if (!mt7921_disable_aspm && mt76_pci_aspm_supported(pdev))
 		dev->aspm_supported = true;
