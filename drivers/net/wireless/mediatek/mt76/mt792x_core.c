@@ -3,6 +3,7 @@
 
 #include <linux/module.h>
 #include <linux/firmware.h>
+#include <linux/pci.h>
 
 #include "mt792x.h"
 #include "dma.h"
@@ -1027,6 +1028,43 @@ int mt792xe_mcu_fw_pmctrl(struct mt792x_dev *dev)
 }
 EXPORT_SYMBOL_GPL(mt792xe_mcu_fw_pmctrl);
 
+/* After FW_START the MT7932 BAR stops answering.  Config space is routed
+ * independently of the BAR window, so reading it separates "the endpoint left
+ * the link" from "the endpoint is present but its memory decode is gone".
+ */
+static void mt7932_fw_start_bus_probe(struct mt792x_dev *dev)
+{
+	struct pci_dev *pdev;
+	u32 id = 0, cmd = 0;
+	u16 lnksta = 0, devsta = 0;
+
+	if (!dev_is_pci(dev->mt76.dev)) {
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FW_START_BUS_PROBE: not a pci device\n");
+		return;
+	}
+
+	pdev = to_pci_dev(dev->mt76.dev);
+
+	pci_read_config_dword(pdev, PCI_VENDOR_ID, &id);
+	pci_read_config_dword(pdev, PCI_COMMAND, &cmd);
+	pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta);
+	pcie_capability_read_word(pdev, PCI_EXP_DEVSTA, &devsta);
+
+	dev_err(dev->mt76.dev,
+		"J700_MT7932_FW_START_BUS_PROBE: cfg_id=0x%08x cmd=0x%08x lnksta=0x%04x devsta=0x%04x\n",
+		id, cmd, lnksta, devsta);
+
+	if (id == 0xffffffff)
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FW_START_BUS_PROBE: ENDPOINT_GONE config space unreadable\n");
+	else
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FW_START_BUS_PROBE: ENDPOINT_PRESENT mem_en=%u bus_master=%u\n",
+			!!(cmd & PCI_COMMAND_MEMORY),
+			!!(cmd & PCI_COMMAND_MASTER));
+}
+
 int mt792x_load_firmware(struct mt792x_dev *dev)
 {
 	int ret;
@@ -1127,22 +1165,29 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 			 */
 			u32 misc = mt76_rr(dev, MT_CONN_ON_MISC);
 
-			dev_err(dev->mt76.dev,
-				"J700_MT7932_FW_READY_PROBE: at-timeout misc=0x%08x state=0x%lx n9_rdy=%lu\n",
-				misc,
-				(unsigned long)(misc & MT_TOP_MISC_FW_STATE),
-				(unsigned long)(misc & MT_TOP_MISC2_FW_N9_RDY));
+			/* Cycle 210 measured 0xffffffff here while the same
+			 * register returned real data 2ms earlier, so an
+			 * all-ones read means the endpoint stopped answering
+			 * rather than that the ready bits are set.  Never
+			 * treat it as readiness.
+			 */
+			if (misc == 0xffffffff) {
+				dev_err(dev->mt76.dev,
+					"J700_MT7932_FW_READY_PROBE: MMIO_DEAD misc=0xffffffff (endpoint not answering)\n");
+				mt7932_fw_start_bus_probe(dev);
+			} else {
+				dev_err(dev->mt76.dev,
+					"J700_MT7932_FW_READY_PROBE: at-timeout misc=0x%08x state=0x%lx n9_rdy=%lu\n",
+					misc,
+					(unsigned long)(misc & MT_TOP_MISC_FW_STATE),
+					(unsigned long)(misc & MT_TOP_MISC2_FW_N9_RDY));
 
-			if (mt76_poll_msec(dev, MT_CONN_ON_MISC,
-					   MT_TOP_MISC2_FW_N9_RDY,
-					   MT_TOP_MISC2_FW_N9_RDY, 5000))
-				dev_err(dev->mt76.dev,
-					"J700_MT7932_FW_READY_PROBE: N9_READY_WITHOUT_START_RESPONSE misc=0x%08x\n",
-					mt76_rr(dev, MT_CONN_ON_MISC));
-			else
-				dev_err(dev->mt76.dev,
-					"J700_MT7932_FW_READY_PROBE: n9 never ready after 5000ms misc=0x%08x\n",
-					mt76_rr(dev, MT_CONN_ON_MISC));
+				if ((misc & MT_TOP_MISC2_FW_N9_RDY) ==
+				    MT_TOP_MISC2_FW_N9_RDY)
+					dev_err(dev->mt76.dev,
+						"J700_MT7932_FW_READY_PROBE: N9_READY_WITHOUT_START_RESPONSE misc=0x%08x\n",
+						misc);
+			}
 
 			mt7932_mcu_share_buffer_trace(dev, "ram-upload-fail");
 			dev_err(dev->mt76.dev,
