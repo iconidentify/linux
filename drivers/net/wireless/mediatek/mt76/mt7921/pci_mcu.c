@@ -189,7 +189,19 @@ int mt7921e_mcu_init(struct mt792x_dev *dev)
 	if (err)
 		return err;
 
-	mt76_rmw_field(dev, MT_PCIE_MAC_PM, MT_PCIE_MAC_PM_L0S_DIS, 1);
+	/* MT_PCIE_MAC_PM is BAR 0x10194, which __mt7921_reg_addr() maps from
+	 * chip address 0x74030000 (PCIE_MAC_IREG) - the device's own PCIe MAC
+	 * control block.  mt76's window assumptions have already been shown
+	 * wrong for MT7932 once, at 0x7c050000 (Cycles 196-198), and the
+	 * endpoint leaves the link cleanly with no uncorrectable AER errors.
+	 * Skip the write on MT7932 until the layout is confirmed.
+	 */
+	if (!is_mt7932(&dev->mt76))
+		mt76_rmw_field(dev, MT_PCIE_MAC_PM, MT_PCIE_MAC_PM_L0S_DIS, 1);
+	else
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_PCIE_MAC_PM_SKIP: pm=0x%08x left untouched\n",
+			 mt76_rr(dev, MT_PCIE_MAC_PM));
 
 	err = mt7921_run_firmware(dev);
 	cleanup_q = is_mt7932(&dev->mt76) ? dev->mphy.q_tx[MT_TXQ_BE] :
