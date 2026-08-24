@@ -415,6 +415,21 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	if (mt7921_disable_aspm)
 		mt76_pci_disable_aspm(pdev);
 
+	if (id->device == 0x7932) {
+		int aspm_ret;
+
+		/* mt76_pci_disable_aspm() only clears PCI_EXP_LNKCTL_ASPMC, so
+		 * the L1 PM Substates capability keeps L1.1/L1.2 - including
+		 * the PCI-PM variants - enabled.  On J700 the endpoint leaves
+		 * the link 26-35ms after the last completed MCU response in
+		 * every recorded run, which is what an unrecoverable L1.2
+		 * entry looks like from the Apple root port.
+		 */
+		aspm_ret = pci_disable_link_state(pdev, PCIE_LINK_STATE_ALL);
+		dev_info(&pdev->dev,
+			 "J700_MT7932_ASPM_L1SS_DISABLE: ret=%d\n", aspm_ret);
+	}
+
 	ops = mt792x_get_mac80211_ops(&pdev->dev, &mt7921_ops,
 				      (void *)id->driver_data, &features);
 	if (!ops) {
