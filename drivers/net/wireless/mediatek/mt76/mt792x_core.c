@@ -1116,6 +1116,34 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 	ret = mt76_connac2_load_ram(&dev->mt76, mt792x_ram_name(dev), NULL);
 	if (ret) {
 		if (mt7932) {
+			/* Apple and MediaTek both poll sw_sync0 for
+			 * WIFI_FUNC_READY_BITS after INIT_CMD_ID_WIFI_START;
+			 * neither requires the start command itself to answer.
+			 * MT_CONN_ON_MISC is the mt76 name for that register
+			 * and its low three bits are the same ready field.
+			 * Read it before concluding the firmware never ran,
+			 * because the existing ready poll below is only
+			 * reached when load_ram succeeds.
+			 */
+			u32 misc = mt76_rr(dev, MT_CONN_ON_MISC);
+
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FW_READY_PROBE: at-timeout misc=0x%08x state=0x%lx n9_rdy=%lu\n",
+				misc,
+				(unsigned long)(misc & MT_TOP_MISC_FW_STATE),
+				(unsigned long)(misc & MT_TOP_MISC2_FW_N9_RDY));
+
+			if (mt76_poll_msec(dev, MT_CONN_ON_MISC,
+					   MT_TOP_MISC2_FW_N9_RDY,
+					   MT_TOP_MISC2_FW_N9_RDY, 5000))
+				dev_err(dev->mt76.dev,
+					"J700_MT7932_FW_READY_PROBE: N9_READY_WITHOUT_START_RESPONSE misc=0x%08x\n",
+					mt76_rr(dev, MT_CONN_ON_MISC));
+			else
+				dev_err(dev->mt76.dev,
+					"J700_MT7932_FW_READY_PROBE: n9 never ready after 5000ms misc=0x%08x\n",
+					mt76_rr(dev, MT_CONN_ON_MISC));
+
 			mt7932_mcu_share_buffer_trace(dev, "ram-upload-fail");
 			dev_err(dev->mt76.dev,
 				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=ram-upload ret=%d\n",
