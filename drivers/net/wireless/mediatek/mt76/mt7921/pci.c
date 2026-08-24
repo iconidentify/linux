@@ -416,7 +416,8 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 		mt76_pci_disable_aspm(pdev);
 
 	if (id->device == 0x7932) {
-		int aspm_ret;
+		struct pci_dev *parent;
+		int aspm_ret, aer;
 
 		/* mt76_pci_disable_aspm() only clears PCI_EXP_LNKCTL_ASPMC, so
 		 * the L1 PM Substates capability keeps L1.1/L1.2 - including
@@ -428,6 +429,35 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 		aspm_ret = pci_disable_link_state(pdev, PCIE_LINK_STATE_ALL);
 		dev_info(&pdev->dev,
 			 "J700_MT7932_ASPM_L1SS_DISABLE: ret=%d\n", aspm_ret);
+
+		/* AER status bits are sticky, so the values read after the link
+		 * drops cannot be separated from link-training artifacts.
+		 * Record them here and clear both registers (write-1-to-clear)
+		 * so anything set at failure time accumulated during this run.
+		 */
+		parent = pdev->bus->self;
+		aer = parent ? pci_find_ext_capability(parent,
+						       PCI_EXT_CAP_ID_ERR) : 0;
+		if (aer) {
+			u32 uncor = 0, cor = 0;
+
+			pci_read_config_dword(parent,
+					      aer + PCI_ERR_UNCOR_STATUS,
+					      &uncor);
+			pci_read_config_dword(parent, aer + PCI_ERR_COR_STATUS,
+					      &cor);
+			dev_info(&pdev->dev,
+				 "J700_MT7932_AER_BASELINE: uncor=0x%08x cor=0x%08x (clearing)\n",
+				 uncor, cor);
+			pci_write_config_dword(parent,
+					       aer + PCI_ERR_UNCOR_STATUS,
+					       uncor);
+			pci_write_config_dword(parent, aer + PCI_ERR_COR_STATUS,
+					       cor);
+		} else {
+			dev_info(&pdev->dev,
+				 "J700_MT7932_AER_BASELINE: no AER capability on parent\n");
+		}
 	}
 
 	ops = mt792x_get_mac80211_ops(&pdev->dev, &mt7921_ops,
