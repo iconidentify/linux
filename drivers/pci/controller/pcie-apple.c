@@ -116,6 +116,7 @@ MODULE_PARM_DESC(link_up_timeout, "PCIe link training timeout in milliseconds");
 #define   PORT_PERST_OFF		BIT(0)
 #define PORT_RID2SID			0x00828
 #define   PORT_RID2SID_VALID		BIT(31)
+#define   PORT_RID2SID_SID		GENMASK(19, 16)
 #define   PORT_RID2SID_SID_SHIFT	16
 #define   PORT_RID2SID_BUS_SHIFT	8
 #define   PORT_RID2SID_DEV_SHIFT	3
@@ -160,6 +161,7 @@ struct hw_info {
 	u32 port_rid2sid;
 	u32 port_msimap;
 	u32 max_rid2sid;
+	bool rid2sid_index_is_sid;
 };
 
 static const struct hw_info t8103_hw = {
@@ -183,6 +185,19 @@ static const struct hw_info t602x_hw = {
 	.port_msimap		= PORT_T602X_MSIMAP,
 	/* 16 on t602x, guess for autodetect on future HW */
 	.max_rid2sid		= 512,
+};
+
+static const struct hw_info t8140_hw = {
+	.phy_lane_ctl		= 0,
+	.port_msiaddr		= PORT_T602X_MSIADDR,
+	.port_msiaddr_hi	= PORT_T602X_MSIADDR_HI,
+	.port_refclk		= 0,
+	.port_perst		= PORT_T602X_PERST,
+	.port_rid2sid		= PORT_T602X_RID2SID,
+	.port_msimap		= PORT_T602X_MSIMAP,
+	/* J700 ADT sid-count is 19. AppleT8140PCIe uses slot == SID. */
+	.max_rid2sid		= 19,
+	.rid2sid_index_is_sid = true,
 };
 
 struct apple_pcie {
@@ -887,14 +902,26 @@ static int apple_pcie_enable_device(struct pci_host_bridge *bridge, struct pci_d
 			"iommu-map-mask", NULL, &sid);
 	if (err)
 		return err;
+	if (!FIELD_FIT(PORT_RID2SID_SID, sid))
+		return -ERANGE;
 
 	mutex_lock(&port->pcie->lock);
 
-	idx = bitmap_find_free_region(port->sid_map, port->sid_map_sz, 0);
+	if (port->pcie->hw->rid2sid_index_is_sid) {
+		if (sid >= port->sid_map_sz || test_bit(sid, port->sid_map)) {
+			idx = -ENOSPC;
+		} else {
+			__set_bit(sid, port->sid_map);
+			idx = sid;
+		}
+	} else {
+		idx = bitmap_find_free_region(port->sid_map,
+					      port->sid_map_sz, 0);
+	}
 	if (idx >= 0) {
 		apple_pcie_rid2sid_write(port, idx,
 					 PORT_RID2SID_VALID |
-					 (sid << PORT_RID2SID_SID_SHIFT) | rid);
+					 FIELD_PREP(PORT_RID2SID_SID, sid) | rid);
 
 		dev_dbg(&pdev->dev, "mapping RID%x to SID%x (index %d)\n",
 			rid, sid, idx);
@@ -1047,6 +1074,7 @@ static int apple_pcie_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id apple_pcie_of_match[] = {
+	{ .compatible = "apple,t8140-pcie",	.data = &t8140_hw },
 	{ .compatible = "apple,t6020-pcie",	.data = &t602x_hw },
 	{ .compatible = "apple,pcie",		.data = &t8103_hw },
 	{ }
