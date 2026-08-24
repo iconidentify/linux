@@ -227,11 +227,8 @@ static void apple_pcie_link_down_work(struct work_struct *work)
 		reset = gpiod_get_value_cansleep(port->reset_gpio);
 
 	dev_info(port->pcie->dev,
-		 "J700_T8140_PCIE_LINK_DOWN_CONTROLS: pwren=%d reset=%d linksts=%08x status=%08x appclk=%08x phy=%08x\n",
-		 pwren, reset, readl_relaxed(port->base + PORT_LINKSTS),
-		 readl_relaxed(port->base + PORT_STATUS),
-		 readl_relaxed(port->base + PORT_APPCLK),
-		 readl_relaxed(port->phy + PHY_LANE_CFG));
+		 "J700_T8140_PCIE_LINK_DOWN_GPIOS: pwren=%d reset=%d\n",
+		 pwren, reset);
 }
 
 static void rmw_set(u32 set, void __iomem *addr)
