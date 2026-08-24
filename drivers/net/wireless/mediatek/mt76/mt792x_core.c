@@ -1034,9 +1034,10 @@ EXPORT_SYMBOL_GPL(mt792xe_mcu_fw_pmctrl);
  */
 static void mt7932_fw_start_bus_probe(struct mt792x_dev *dev)
 {
-	struct pci_dev *pdev;
-	u32 id = 0, cmd = 0;
-	u16 lnksta = 0, devsta = 0;
+	struct pci_dev *pdev, *parent;
+	u32 id = 0, cmd = 0, uncor = 0, cor = 0;
+	u16 lnksta = 0, devsta = 0, plnksta = 0;
+	int pos;
 
 	if (!dev_is_pci(dev->mt76.dev)) {
 		dev_err(dev->mt76.dev,
@@ -1063,6 +1064,39 @@ static void mt7932_fw_start_bus_probe(struct mt792x_dev *dev)
 			"J700_MT7932_FW_START_BUS_PROBE: ENDPOINT_PRESENT mem_en=%u bus_master=%u\n",
 			!!(cmd & PCI_COMMAND_MEMORY),
 			!!(cmd & PCI_COMMAND_MASTER));
+
+	/* The root port survives the endpoint and has AER enabled, so it can
+	 * say why the link went down.  A Surprise Down uncorrectable error
+	 * means the endpoint vanished; a completion timeout or receiver error
+	 * points somewhere else entirely.
+	 */
+	parent = pdev->bus->self;
+	if (!parent) {
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FW_START_ROOT_PROBE: no parent bridge\n");
+		return;
+	}
+
+	pcie_capability_read_word(parent, PCI_EXP_LNKSTA, &plnksta);
+	pos = pci_find_ext_capability(parent, PCI_EXT_CAP_ID_ERR);
+	if (pos) {
+		pci_read_config_dword(parent, pos + PCI_ERR_UNCOR_STATUS,
+				      &uncor);
+		pci_read_config_dword(parent, pos + PCI_ERR_COR_STATUS, &cor);
+	}
+
+	dev_err(dev->mt76.dev,
+		"J700_MT7932_FW_START_ROOT_PROBE: lnksta=0x%04x speed=%u width=%u aer_uncor=0x%08x aer_cor=0x%08x\n",
+		plnksta, plnksta & PCI_EXP_LNKSTA_CLS,
+		(plnksta & PCI_EXP_LNKSTA_NLW) >> PCI_EXP_LNKSTA_NLW_SHIFT,
+		uncor, cor);
+
+	if (uncor & PCI_ERR_UNC_SURPDN)
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FW_START_ROOT_PROBE: SURPRISE_DOWN endpoint removed itself from the link\n");
+	if (uncor & PCI_ERR_UNC_COMP_TIME)
+		dev_err(dev->mt76.dev,
+			"J700_MT7932_FW_START_ROOT_PROBE: COMPLETION_TIMEOUT\n");
 }
 
 int mt792x_load_firmware(struct mt792x_dev *dev)
