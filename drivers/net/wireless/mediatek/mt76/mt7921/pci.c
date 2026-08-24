@@ -546,18 +546,20 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 			 "J700_MT7932_FIRMWARE_GATE_BEGIN: chipid=0x%04x revision=0x%08x\n",
 			 chipid, mdev->rev);
 
-	if (id->device == 0x7932) {
-		/* AppleSunriseWLAN's normal start takes driver ownership and enters
-		 * nicInitializeAdapter without pulsing WFSYS_SW_RST_B.  Preserve the
-		 * fresh iBoot state while reconstructing its firmware-download path.
-		 */
+	/*
+	 * AppleSunriseWLAN's ordinary DriverKit start adopts an already prepared
+	 * device, but its MT7961 initial/recovery path performs the same essential
+	 * assert-delay-deassert-init-done sequence as mt792x_wfsys_reset().  The
+	 * J700 handoff does not provide macOS' complete HAL-owned preparation:
+	 * preserving that state was hardware-proven to let the endpoint leave the
+	 * PCIe link, while Cycles 141-162 kept the link alive after this reset.
+	 */
+	ret = mt792x_wfsys_reset(dev);
+	if (ret)
+		goto err_free_dev;
+	if (id->device == 0x7932)
 		dev_info(mdev->dev,
-			 "J700_MT7932_WFSYS_PRESERVE_PASS: source=iboot reset=skipped\n");
-	} else {
-		ret = mt792x_wfsys_reset(dev);
-		if (ret)
-			goto err_free_dev;
-	}
+			 "J700_MT7932_WFSYS_RESET_PASS: source=hardware-control delay_ms=50\n");
 
 	mt76_wr(dev, irq_map.host_irq_enable, 0);
 
