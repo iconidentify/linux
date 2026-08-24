@@ -159,6 +159,7 @@ struct hw_info {
 	u32 port_rid2sid;
 	u32 port_msimap;
 	u32 max_rid2sid;
+	bool force_refclk_ungated;
 };
 
 static const struct hw_info t8103_hw = {
@@ -182,6 +183,18 @@ static const struct hw_info t602x_hw = {
 	.port_msimap		= PORT_T602X_MSIMAP,
 	/* 16 on t602x, guess for autodetect on future HW */
 	.max_rid2sid		= 512,
+};
+
+static const struct hw_info t8140_hw = {
+	.phy_lane_ctl		= 0,
+	.port_msiaddr		= PORT_T602X_MSIADDR,
+	.port_msiaddr_hi	= PORT_T602X_MSIADDR_HI,
+	.port_refclk		= 0,
+	.port_perst		= PORT_T602X_PERST,
+	.port_rid2sid		= PORT_T602X_RID2SID,
+	.port_msimap		= PORT_T602X_MSIMAP,
+	.max_rid2sid		= 512,
+	.force_refclk_ungated	= true,
 };
 
 struct apple_pcie {
@@ -698,10 +711,27 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 			return ret;
 	}
 
-	if (pcie->hw->port_refclk)
+	if (pcie->hw->port_refclk) {
 		rmw_clear(PORT_REFCLK_CGDIS, port->base + pcie->hw->port_refclk);
-	else
+	} else if (pcie->hw->force_refclk_ungated) {
+		u32 before = readl_relaxed(port->phy + PHY_LANE_CFG);
+
+		/*
+		 * The exact AppleT8140PCIePort implementation only enables
+		 * reference-clock gating through enablePortRefclkGating(), after
+		 * configuring J700's function-clkreq GPIO contract.  The generic
+		 * T602x fallback has no CLKREQ plumbing, so enabling both clock-gate
+		 * bits here can remove the live MT7932 endpoint from the link.
+		 */
+		rmw_clear(PHY_LANE_CFG_REFCLKCGEN,
+			  port->phy + PHY_LANE_CFG);
+		dev_info(pcie->dev,
+			 "J700_T8140_PCIE_REFCLK_GATING_OFF: before=%08x after=%08x mask=%08x\n",
+			 before, readl_relaxed(port->phy + PHY_LANE_CFG),
+			 (u32)PHY_LANE_CFG_REFCLKCGEN);
+	} else {
 		rmw_set(PHY_LANE_CFG_REFCLKCGEN, port->phy + PHY_LANE_CFG);
+	}
 
 	rmw_clear(PORT_APPCLK_CGDIS, port->base + PORT_APPCLK);
 
@@ -1023,6 +1053,7 @@ static int apple_pcie_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id apple_pcie_of_match[] = {
+	{ .compatible = "apple,t8140-pcie",	.data = &t8140_hw },
 	{ .compatible = "apple,t6020-pcie",	.data = &t602x_hw },
 	{ .compatible = "apple,pcie",		.data = &t8103_hw },
 	{ }
