@@ -399,12 +399,6 @@ void mt7921_mcu_rx_event(struct mt792x_dev *dev, struct sk_buff *skb)
 		return;
 
 	rxd = (struct mt76_connac2_mcu_rxd *)skb->data;
-	if (is_mt7932(&dev->mt76) && rxd->seq)
-		dev_info(dev->mt76.dev,
-			 "J700_MT7932_RX_EVENT_INGRESS: eid=%u seq=%u option=%u ext_eid=%u len=%u tail=%*phN\n",
-			 rxd->eid, rxd->seq, rxd->option, rxd->ext_eid,
-			 skb->len, min_t(unsigned int, skb->len, 8),
-			 skb_tail_pointer(skb) - min_t(unsigned int, skb->len, 8));
 
 	if (rxd->option & MCU_UNI_CMD_UNSOLICITED_EVENT) {
 		mt7921_mcu_uni_rx_unsolicited_event(dev, skb);
