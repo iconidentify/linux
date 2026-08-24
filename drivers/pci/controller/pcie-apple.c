@@ -30,6 +30,7 @@
 #include <linux/msi.h>
 #include <linux/of_irq.h>
 #include <linux/pci-ecam.h>
+#include <linux/workqueue.h>
 
 #include "pci-host-common.h"
 
@@ -204,12 +205,34 @@ struct apple_pcie_port {
 	struct device_node	*np;
 	void __iomem		*base;
 	void __iomem		*phy;
+	struct gpio_desc	*reset_gpio;
+	struct gpio_desc	*pwren_gpio;
+	struct work_struct	link_down_work;
 	struct irq_domain	*domain;
 	struct list_head	entry;
 	unsigned long		*sid_map;
 	int			sid_map_sz;
 	int			idx;
 };
+
+static void apple_pcie_link_down_work(struct work_struct *work)
+{
+	struct apple_pcie_port *port =
+		container_of(work, struct apple_pcie_port, link_down_work);
+	int pwren = -ENODEV, reset = -ENODEV;
+
+	if (port->pwren_gpio)
+		pwren = gpiod_get_value_cansleep(port->pwren_gpio);
+	if (port->reset_gpio)
+		reset = gpiod_get_value_cansleep(port->reset_gpio);
+
+	dev_info(port->pcie->dev,
+		 "J700_T8140_PCIE_LINK_DOWN_CONTROLS: pwren=%d reset=%d linksts=%08x status=%08x appclk=%08x phy=%08x\n",
+		 pwren, reset, readl_relaxed(port->base + PORT_LINKSTS),
+		 readl_relaxed(port->base + PORT_STATUS),
+		 readl_relaxed(port->base + PORT_APPCLK),
+		 readl_relaxed(port->phy + PHY_LANE_CFG));
+}
 
 static void rmw_set(u32 set, void __iomem *addr)
 {
@@ -464,6 +487,7 @@ static irqreturn_t apple_pcie_port_irq(int irq, void *data)
 	case PORT_INT_LINK_DOWN:
 		dev_info_ratelimited(port->pcie->dev, "Link down on %pOF\n",
 				     port->np);
+		schedule_work(&port->link_down_work);
 		break;
 	default:
 		return IRQ_NONE;
@@ -602,6 +626,8 @@ static int apple_pcie_setup_link(struct apple_pcie *pcie,
 		else
 			return PTR_ERR(pwren);
 	}
+	port->reset_gpio = reset;
+	port->pwren_gpio = pwren;
 
 	rmw_set(PORT_APPCLK_EN, port->base + PORT_APPCLK);
 
@@ -658,6 +684,7 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 	port = devm_kzalloc(pcie->dev, sizeof(*port), GFP_KERNEL);
 	if (!port)
 		return -ENOMEM;
+	INIT_WORK(&port->link_down_work, apple_pcie_link_down_work);
 
 	port->sid_map = devm_bitmap_zalloc(pcie->dev, pcie->hw->max_rid2sid, GFP_KERNEL);
 	if (!port->sid_map)
