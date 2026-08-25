@@ -16,6 +16,33 @@ static bool mt7921_disable_clc;
 module_param_named(disable_clc, mt7921_disable_clc, bool, 0644);
 MODULE_PARM_DESC(disable_clc, "disable CLC support");
 
+/* MediaTek's own gen4-mt79xx driver decodes the INIT_EVENT_CMD_RESULT status
+ * byte for the firmware-start path in wlanInitEventStatusCodeToStr()
+ * (chips/common/fw_dl.c, GPL-2.0 OR BSD-3-Clause).  The codes are:
+ *
+ *	0 success   1 invalid param   2 invalid crc   3 decrypt fail
+ *	4 unknown cmd   5 timeout   6 sec boot check fail
+ *
+ * Note the scope.  MT7932 does NOT follow this table for the download-config
+ * and patch-finish results - hardware measures status 1 as success there, which
+ * is the Apple semantics the sweep accept rule already encodes.  Only apply the
+ * names to FW_START, where 0 is success in both stacks.
+ *
+ * The MT7932 endpoint has never yet answered FW_START at all, so this decode
+ * has never fired.  It exists so that if a rejection ever does arrive it is
+ * read rather than guessed - "sec boot check fail" in particular would say the
+ * ROM authenticated the loaded image and refused it.
+ */
+static const char *mt7932_fw_start_status_str(u8 status)
+{
+	static const char * const names[] = {
+		"success", "invalid param", "invalid crc", "decrypt fail",
+		"unknown cmd", "timeout", "sec boot check fail",
+	};
+
+	return status < ARRAY_SIZE(names) ? names[status] : "unknown";
+}
+
 int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 			      struct sk_buff *skb, int seq)
 {
@@ -70,6 +97,12 @@ int mt7921_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 			dev_info(mdev->dev,
 				 "J700_MT7932_INIT_CMD_RESULT: eid=%u seq=%u cid=0x%02x expected=0x%02x status=%d\n",
 				 rxd->eid, rxd->seq, response_cid, mcu_cmd, ret);
+		if (cmd == MCU_CMD(FW_START_REQ) && rxd->eid == 1 && ret)
+			dev_err(mdev->dev,
+				"J700_MT7932_FW_START_REJECTED: status=%d (%s) cid=0x%02x\n",
+				ret, mt7932_fw_start_status_str(ret),
+				response_cid);
+
 		if (cmd == MCU_CMD(TARGET_ADDRESS_LEN_REQ) && rxd->eid == 1 &&
 		    ret == 1 && response_cid == 0) {
 			if (rxd->seq == 76)
