@@ -3,6 +3,9 @@
 
 #include <linux/firmware.h>
 #include <linux/delay.h>
+#include <linux/ktime.h>
+#include <linux/pci.h>
+#include <linux/workqueue.h>
 #include "mt76_connac2_mac.h"
 #include "mt76_connac_mcu.h"
 #include "mt792x_regs.h"
@@ -3063,13 +3066,129 @@ static int mt7932_mcu_drain_fwdl(struct mt76_dev *dev)
 	return -ETIMEDOUT;
 }
 
+static int mt7932_mcu_require_host_ready(struct mt76_dev *dev)
+{
+	struct pci_dev *pdev;
+	u16 command = 0xffff;
+	int ret;
+
+	if (!dev_is_pci(dev->dev))
+		return -ENODEV;
+
+	pdev = to_pci_dev(dev->dev);
+	ret = pci_read_config_word(pdev, PCI_COMMAND, &command);
+	if (ret || command == 0xffff ||
+	    (command & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
+	    (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) {
+		dev_err(dev->dev,
+			"J700_MT7932_HOST_READY_FAIL: command=0x%04x ret=%d memory=%u bme=%u\n",
+			command, ret, !!(command & PCI_COMMAND_MEMORY),
+			!!(command & PCI_COMMAND_MASTER));
+		return ret ?: -ENODEV;
+	}
+
+	return 0;
+}
+
+/* Cycle 250 discriminator: MT7932 endpoint liveness across the FW_START wait.
+ *
+ * Between submitting the FW_START descriptor and the MCU response the host
+ * issues no PCIe transaction to the endpoint at all - mt76_mcu_wait_response()
+ * sleeps on a completion.  Every recorded J700 run loses the endpoint inside
+ * that silent window (26-56 ms after the last completed MCU response on the
+ * Cycle 207-214 baseline, 100-142 ms after FW_START on the Cycle 230-249
+ * baseline), and the surviving root port always reports a clean link-down with
+ * no uncorrectable AER status.
+ *
+ * macOS never produces that silence on this port.  The j700ap ADT keeps the
+ * link in a managed power state rather than an unmanaged one:
+ * /arm-io/apcie/pci-bridge0 and its wlan child both carry pci-aspm-default = 2
+ * and pci-l1pm-control, and AppleEmbeddedPCIEPort owns a bus-probe timer, so
+ * configuration traffic to the function keeps flowing after the port is
+ * enabled.
+ *
+ * This poller reads only the endpoint's vendor ID.  Configuration space is
+ * routed independently of the BAR window, so the read touches no MCU state, no
+ * ring and no doorbell, and it cannot perturb the command stream that has
+ * already been submitted.  It answers one question - does the endpoint survive
+ * when the link is not left completely idle - and records the exact moment the
+ * endpoint stops answering, which the root port's link-down interrupt only
+ * reports tens of milliseconds later.
+ *
+ * 0xffffffff is always treated as dead, never as a valid identity.
+ */
+struct mt7932_fw_start_watch {
+	struct delayed_work work;
+	struct pci_dev *pdev;
+	ktime_t start;
+	ktime_t gone_at;
+	unsigned int polls;
+	u32 last_id;
+	bool gone;
+};
+
+static void mt7932_fw_start_watch_fn(struct work_struct *work)
+{
+	struct mt7932_fw_start_watch *w = container_of(to_delayed_work(work),
+						       struct mt7932_fw_start_watch,
+						       work);
+	u32 id = 0xffffffff;
+
+	if (pci_read_config_dword(w->pdev, PCI_VENDOR_ID, &id) ||
+	    id == 0xffffffff) {
+		w->last_id = id;
+		w->gone_at = ktime_get();
+		WRITE_ONCE(w->gone, true);
+		return;
+	}
+
+	w->last_id = id;
+	w->polls++;
+	schedule_delayed_work(&w->work, 1);
+}
+
+static bool mt7932_fw_start_watch_begin(struct mt76_dev *dev,
+					struct mt7932_fw_start_watch *w)
+{
+	if (!is_mt7932(dev) || !dev_is_pci(dev->dev))
+		return false;
+
+	memset(w, 0, sizeof(*w));
+	w->pdev = to_pci_dev(dev->dev);
+	w->start = ktime_get();
+	INIT_DELAYED_WORK_ONSTACK(&w->work, mt7932_fw_start_watch_fn);
+	schedule_delayed_work(&w->work, 1);
+
+	return true;
+}
+
+static void mt7932_fw_start_watch_end(struct mt76_dev *dev,
+				      struct mt7932_fw_start_watch *w)
+{
+	cancel_delayed_work_sync(&w->work);
+	destroy_delayed_work_on_stack(&w->work);
+
+	if (READ_ONCE(w->gone))
+		dev_err(dev->dev,
+			"J700_MT7932_FW_START_LIVENESS: ENDPOINT_GONE polls=%u alive_us=%lld cfg_id=0x%08x\n",
+			w->polls, ktime_us_delta(w->gone_at, w->start),
+			w->last_id);
+	else
+		dev_info(dev->dev,
+			 "J700_MT7932_FW_START_LIVENESS: ENDPOINT_PRESENT polls=%u window_us=%lld cfg_id=0x%08x\n",
+			 w->polls, ktime_us_delta(ktime_get(), w->start),
+			 w->last_id);
+}
+
 static int
 mt76_connac_mcu_send_ram_firmware(struct mt76_dev *dev,
 				  const struct mt76_connac2_fw_trailer *hdr,
 				  const u8 *data, bool is_wa)
 {
 	int i, offset = 0, max_len = mt76_is_sdio(dev) ? 2048 : 4096;
+	struct mt7932_fw_start_watch watch;
 	u32 override = 0, option = 0;
+	bool watching = false;
 	int ret;
 
 	if (is_mt7932(dev)) {
@@ -3125,12 +3244,21 @@ next:
 		option |= FW_START_WORKING_PDA_CR4;
 
 	if (is_mt7932(dev)) {
+		ret = mt7932_mcu_require_host_ready(dev);
+		if (ret)
+			return ret;
+
 		ret = mt7932_sec_protect_fwdl(dev, true);
 		if (ret)
 			return ret;
 	}
 
+	watching = mt7932_fw_start_watch_begin(dev, &watch);
+
 	ret = mt76_connac_mcu_start_firmware(dev, override, option);
+
+	if (watching)
+		mt7932_fw_start_watch_end(dev, &watch);
 
 	if (is_mt7932(dev)) {
 		int release_ret;
