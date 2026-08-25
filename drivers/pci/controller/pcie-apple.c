@@ -162,6 +162,8 @@ struct hw_info {
 	u32 port_msimap;
 	u32 max_rid2sid;
 	bool rid2sid_index_is_sid;
+	bool clear_phy_refclk_cgen;
+	bool sunrise_power_sequence;
 };
 
 static const struct hw_info t8103_hw = {
@@ -198,6 +200,8 @@ static const struct hw_info t8140_hw = {
 	/* J700 ADT sid-count is 19. AppleT8140PCIe uses slot == SID. */
 	.max_rid2sid		= 19,
 	.rid2sid_index_is_sid = true,
+	.clear_phy_refclk_cgen = true,
+	.sunrise_power_sequence = true,
 };
 
 struct apple_pcie {
@@ -223,6 +227,7 @@ struct apple_pcie_port {
 	struct gpio_desc	*reset_gpio;
 	struct gpio_desc	*pwren_gpio;
 	struct work_struct	link_down_work;
+	bool			link_retrain_attempted;
 	struct irq_domain	*domain;
 	struct list_head	entry;
 	unsigned long		*sid_map;
@@ -234,7 +239,9 @@ static void apple_pcie_link_down_work(struct work_struct *work)
 {
 	struct apple_pcie_port *port =
 		container_of(work, struct apple_pcie_port, link_down_work);
+	u32 before, after = 0;
 	int pwren = -ENODEV, reset = -ENODEV;
+	int ret;
 
 	if (port->pwren_gpio)
 		pwren = gpiod_get_value_cansleep(port->pwren_gpio);
@@ -244,6 +251,32 @@ static void apple_pcie_link_down_work(struct work_struct *work)
 	dev_info(port->pcie->dev,
 		 "J700_T8140_PCIE_LINK_DOWN_GPIOS: pwren=%d reset=%d\n",
 		 pwren, reset);
+
+	if (!port->pcie->hw->sunrise_power_sequence ||
+	    port->link_retrain_attempted)
+		return;
+	port->link_retrain_attempted = true;
+
+	/* The J700 endpoint leaves the link cleanly with RegOn asserted and
+	 * PERST# deasserted.  Restart only the surviving root-port LTSSM once;
+	 * never touch the post-drop PHY aperture, which is known to SError.
+	 */
+	before = readl_relaxed(port->base + PORT_LINKSTS);
+	writel_relaxed(0, port->base + PORT_LTSSMCTL);
+	readl_relaxed(port->base + PORT_LTSSMCTL);
+	writel_relaxed(PORT_LTSSMCTL_START, port->base + PORT_LTSSMCTL);
+	ret = readl_relaxed_poll_timeout(port->base + PORT_LINKSTS, after,
+					 after & PORT_LINKSTS_UP, 1000, 250000);
+	if (ret) {
+		dev_info(port->pcie->dev,
+			 "J700_T8140_PCIE_LINK_RETRAIN_FAIL: before=0x%08x after=0x%08x timeout_us=250000 phy_accesses=0 power_toggles=0\n",
+			 before, after);
+		return;
+	}
+
+	dev_info(port->pcie->dev,
+		 "J700_T8140_PCIE_LINK_RETRAIN_PASS: before=0x%08x after=0x%08x phy_accesses=0 power_toggles=0\n",
+		 before, after);
 }
 
 static void rmw_set(u32 set, void __iomem *addr)
@@ -648,6 +681,16 @@ static int apple_pcie_setup_link(struct apple_pcie *pcie,
 	for (u32 idx = 0; idx < num_aux_resets; idx++)
 		gpiod_set_value_cansleep(aux_reset[idx], 1);
 
+	/*
+	 * AppleSunriseHAL's J700 attach path performs an explicit RegOn power
+	 * cycle before enabling the PCIe port: low for 2 ms, high for 150 ms,
+	 * then port enable.  function-reg_on is this port's PWREN descriptor.
+	 */
+	if (pcie->hw->sunrise_power_sequence && pwren) {
+		gpiod_set_value_cansleep(pwren, 0);
+		fsleep(2000);
+	}
+
 	/* Power on the device if required */
 	gpiod_set_value_cansleep(pwren, 1);
 
@@ -659,10 +702,15 @@ static int apple_pcie_setup_link(struct apple_pcie *pcie,
 	 * The minimal Tperst-clk value is 100us (PCIe CEM r5.0, 2.9.2)
 	 * If powering up, the minimal Tpvperl is 100ms
 	 */
-	if (pwren)
+	if (pcie->hw->sunrise_power_sequence && pwren) {
+		msleep(150);
+		dev_info(pcie->dev,
+			 "J700_T8140_SUNRISE_POWER_SEQUENCE_PASS: pwren=0->1 off_ms=2 on_ms=150\n");
+	} else if (pwren) {
 		msleep(100);
-	else
+	} else {
 		usleep_range(100, 200);
+	}
 
 	/* Deassert PERST# */
 	rmw_set(PORT_PERST_OFF, port->base + pcie->hw->port_perst);
@@ -739,6 +787,8 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 
 	if (pcie->hw->port_refclk)
 		rmw_clear(PORT_REFCLK_CGDIS, port->base + pcie->hw->port_refclk);
+	else if (pcie->hw->clear_phy_refclk_cgen)
+		rmw_clear(PHY_LANE_CFG_REFCLKCGEN, port->phy + PHY_LANE_CFG);
 	else
 		rmw_set(PHY_LANE_CFG_REFCLKCGEN, port->phy + PHY_LANE_CFG);
 

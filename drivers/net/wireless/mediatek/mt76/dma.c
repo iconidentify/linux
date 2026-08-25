@@ -9,8 +9,11 @@
 #include "mt76_connac.h"
 
 #define MT7932_MCU_BOUNCE_STRIDE	8192
-/* Control commands plus Apple's 65-command pre-RAM OTP sequence. */
-#define MT7932_MCU_WM_BOUNCE_ENTRIES	128
+/* Apple 25G83's PCIe command ring has 512 entries.  A bounce pool may not be
+ * smaller than the published descriptor ring even though the pre-runtime
+ * stream currently contains only 77 acknowledged commands.
+ */
+#define MT7932_MCU_WM_BOUNCE_ENTRIES	512
 /* 25G83 needs 17 patch plus 583 RAM scatter payloads at 2 KiB. */
 #define MT7932_MCU_FWDL_BOUNCE_ENTRIES	640
 

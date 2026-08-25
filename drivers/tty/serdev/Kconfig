@@ -22,4 +22,11 @@ config SERIAL_DEV_CTRL_TTYPORT
 	depends on SERIAL_DEV_BUS != m
 	default y
 
+config J700_MT7932_DEBUG_UART
+	bool "J700 MT7932 receive-only debug UART capture"
+	depends on ARCH_APPLE && SERIAL_DEV_BUS
+	help
+	  Capture the MacBook Neo MT7932 firmware debug UART without sending
+	  bytes to the device. This is a bring-up diagnostic.
+
 endif

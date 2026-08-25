@@ -4,22 +4,27 @@
 #include <linux/module.h>
 #include <linux/firmware.h>
 #include <linux/pci.h>
+#include <linux/delay.h>
 
 #include "mt792x.h"
 #include "dma.h"
 
 #define MT7932_MCU_SHARE_IPC_SIZE	0x300
 #define MT7932_MCU_SHARE_AUX_SIZE	0x320
+#define MT7932_MCU_MAP_SETTING		0x7c00e254
+#define MT7932_MCU_MAP_SETTING_VALUE	0x18051848
+#define MT7932_MCU_MAP_SETTING_MASK	GENMASK(31, 16)
+#define MT7932_MCU_MAP_SETTING_READY	0x18050000
 #define MT7932_MCU_SHARE_IPC_ADDR	0x7c053a30
 #define MT7932_MCU_SHARE_FLAGS		0x7c053a38
 #define MT7932_MCU_SHARE_SIZE		0x7c053a3c
-#define MT7932_MCU_SHARE_AUX_ADDR	0x7c053a50
+#define MT7932_MCU_SHARE_AUX_ADDR	0x7c053a54
 #define MT7932_MCU_SHARE_ENABLE		0x7c053c28
 
 static int mt7932_mcu_share_info_init(struct mt792x_dev *dev)
 {
 	struct device *dma_dev = dev->mt76.dma_dev;
-	u32 enable, flags, size, ipc_addr, aux_addr;
+	u32 map, enable, flags, size, ipc_addr, aux_addr;
 
 	if (!dev->mt7932_ipc_buf) {
 		dev->mt7932_ipc_buf = dmam_alloc_coherent(dma_dev,
@@ -45,6 +50,24 @@ static int mt7932_mcu_share_info_init(struct mt792x_dev *dev)
 	memset(dev->mt7932_aux_buf, 0, MT7932_MCU_SHARE_AUX_SIZE);
 	dma_wmb();
 
+	/* AppleSunriseWLAN 25G83 calls mt7922_mcu_map_setting before
+	 * halUdpateMCUShareInfo publishes either coherent buffer.  The callback
+	 * selects the MCU aperture, waits 2 us and accepts the setting only when
+	 * the register's upper half reads back as 0x1805.
+	 */
+	mt76_wr(dev, MT7932_MCU_MAP_SETTING, MT7932_MCU_MAP_SETTING_VALUE);
+	udelay(2);
+	map = mt76_rr(dev, MT7932_MCU_MAP_SETTING);
+	if ((map & MT7932_MCU_MAP_SETTING_MASK) !=
+	    MT7932_MCU_MAP_SETTING_READY)
+		return -EIO;
+
+	/* J700's MT7932 bus-info version is 0x20.  Apple therefore takes the
+	 * legacy five-write branch in halUdpateMCUShareInfo: enable, flags, IPC
+	 * size, IPC low address and auxiliary low address.  In the handshake
+	 * table 0x7c053a50 is not the auxiliary address for this branch;
+	 * 0x7c053a54 is.  Do not invent the version >= 0x21 high-word writes.
+	 */
 	mt76_wr(dev, MT7932_MCU_SHARE_ENABLE, 1);
 	mt76_wr(dev, MT7932_MCU_SHARE_FLAGS, 2);
 	mt76_wr(dev, MT7932_MCU_SHARE_SIZE, MT7932_MCU_SHARE_IPC_SIZE);
@@ -59,8 +82,8 @@ static int mt7932_mcu_share_info_init(struct mt792x_dev *dev)
 	ipc_addr = mt76_rr(dev, MT7932_MCU_SHARE_IPC_ADDR);
 	aux_addr = mt76_rr(dev, MT7932_MCU_SHARE_AUX_ADDR);
 	dev_info(dev->mt76.dev,
-		 "J700_MT7932_MCU_SHARE_INFO_READBACK: enable=0x%08x flags=0x%08x size=0x%08x ipc=0x%08x aux=0x%08x\n",
-		 enable, flags, size, ipc_addr, aux_addr);
+		 "J700_MT7932_MCU_MAP_SHARE_PASS: map=0x%08x enable=0x%08x flags=0x%08x size=0x%08x ipc=0x%08x aux=0x%08x\n",
+		 map, enable, flags, size, ipc_addr, aux_addr);
 
 	return 0;
 }
@@ -1243,8 +1266,24 @@ int mt792x_load_firmware(struct mt792x_dev *dev)
 
 		return -EIO;
 	}
-	if (mt7932)
-		dev_info(dev->mt76.dev, "J700_MT7932_N9_READY_PASS\n");
+	if (mt7932) {
+		u32 misc = mt76_rr(dev, MT_CONN_ON_MISC);
+
+		/* A dead PCIe endpoint returns all ones, which also contains the
+		 * N9-ready mask and therefore satisfies mt76_poll_msec().  Cycle 228
+		 * exposed this false positive after the root port had already reported
+		 * link-down.  Validate the register before publishing readiness.
+		 */
+		if (misc == 0xffffffff) {
+			dev_err(dev->mt76.dev,
+				"J700_MT7932_FIRMWARE_GATE_FAIL: stage=n9-ready misc=0xffffffff endpoint-not-answering ret=%d\n",
+				-ENODEV);
+			return -ENODEV;
+		}
+
+		dev_info(dev->mt76.dev,
+			 "J700_MT7932_N9_READY_PASS: misc=0x%08x\n", misc);
+	}
 
 #ifdef CONFIG_PM
 	dev->mt76.hw->wiphy->wowlan = &mt76_connac_wowlan_support;

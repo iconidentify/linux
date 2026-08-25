@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/of.h>
+#include <linux/delay.h>
 
 #include "mt7921.h"
 #include "../mt76_connac2_mac.h"
@@ -36,6 +37,28 @@ static const struct pci_device_id mt7921_pci_device_table[] = {
 static bool mt7921_disable_aspm;
 module_param_named(disable_aspm, mt7921_disable_aspm, bool, 0644);
 MODULE_PARM_DESC(disable_aspm, "disable PCI ASPM support");
+
+#define MT7932_MMIO_MAP_SETTING		0x7c00e250
+#define MT7932_MMIO_MAP_SETTING_VALUE	0x70001846
+#define MT7932_MMIO_MAP_SETTING_MASK	GENMASK(31, 16)
+#define MT7932_MMIO_MAP_SETTING_READY	0x70000000
+
+static int mt7932_mmio_map_setting(struct mt792x_dev *dev)
+{
+	u32 val;
+
+	/* Exact AppleSunriseWLAN 25G83 mt7922MMIOMappingSet callback.  It runs
+	 * after nicpmSetDriverOwn and before asicConnac2xWfdmaStop.
+	 */
+	mt76_wr(dev, MT7932_MMIO_MAP_SETTING, MT7932_MMIO_MAP_SETTING_VALUE);
+	udelay(2);
+	val = mt76_rr(dev, MT7932_MMIO_MAP_SETTING);
+	if ((val & MT7932_MMIO_MAP_SETTING_MASK) !=
+	    MT7932_MMIO_MAP_SETTING_READY)
+		return -EIO;
+
+	return 0;
+}
 
 static int mt7921e_init_reset(struct mt792x_dev *dev)
 {
@@ -170,7 +193,7 @@ static u32 mt7921_rmw(struct mt76_dev *mdev, u32 offset, u32 mask, u32 val)
 	return dev->bus_ops->rmw(mdev, addr, mask, val);
 }
 
-static int __maybe_unused mt7932_dma_sched_init(struct mt792x_dev *dev)
+static int mt7932_dma_sched_init(struct mt792x_dev *dev)
 {
 	static const u32 quota[16] = {
 		0x02000028, 0x02000028, 0x02000028, 0x02000028,
@@ -282,6 +305,15 @@ static int mt7921_dma_init(struct mt792x_dev *dev)
 	ret = mt792x_dma_disable(dev, true);
 	if (ret)
 		return ret;
+	if (is_mt7932(&dev->mt76)) {
+		/* Linux's forced WPDMA reset also resets DMASHDL.  Restore the
+		 * exact image Apple installs at the start of halHifSwInfoInit before
+		 * publishing any ring.
+		 */
+		ret = mt7932_dma_sched_init(dev);
+		if (ret)
+			return ret;
+	}
 
 	/* init tx queue */
 	ret = mt76_connac_init_tx_queues(dev->phy.mt76, MT7921_TXQ_BAND0,
@@ -527,13 +559,36 @@ static int mt7921_pci_probe(struct pci_dev *pdev,
 	if (!mt7921_disable_aspm && mt76_pci_aspm_supported(pdev))
 		dev->aspm_supported = true;
 
-	ret = mt792xe_mcu_fw_pmctrl(dev);
-	if (ret)
-		goto err_free_dev;
+	/* AppleSunriseWLAN 25G83 asicConnac2xCapInit selects PCIe ports 17/16
+	 * and writes bit 0 to the Connac2 band-0 IRQ enable register before
+	 * wlanAdapterStart claims driver ownership.
+	 */
+	if (id->device == 0x7932)
+		mt76_wr(dev, MT_CONN_ON_IRQ_ENA, BIT(0));
+
+	/* AppleSunriseWLAN's normal MT7932 start claims driver ownership once,
+	 * before WFDMA initialization.  Do not first hand the inherited device
+	 * back to firmware ownership; that transition is absent from Apple's
+	 * pre-download path.
+	 */
+	if (id->device != 0x7932) {
+		ret = mt792xe_mcu_fw_pmctrl(dev);
+		if (ret)
+			goto err_free_dev;
+	}
 
 	ret = __mt792xe_mcu_drv_pmctrl(dev);
 	if (ret)
 		goto err_free_dev;
+	if (id->device == 0x7932) {
+		dev_info(mdev->dev,
+			 "J700_MT7932_DRIVER_OWN_PASS: register=0x%08x request=0x%08x sync_mask=0x%08x source=apple-pre-wfdma\n",
+			 MT_CONN_ON_LPCTL, (u32)PCIE_LPCR_HOST_CLR_OWN,
+			 (u32)PCIE_LPCR_HOST_OWN_SYNC);
+		ret = mt7932_mmio_map_setting(dev);
+		if (ret)
+			goto err_free_dev;
+	}
 
 	chipid = mt7921_l1_rr(dev, MT_HW_CHIPID);
 	if (chipid == 0x7961 && (mt7921_l1_rr(dev, MT_HW_BOUND) & BIT(7)))

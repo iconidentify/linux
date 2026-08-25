@@ -4,3 +4,4 @@ serdev-objs := core.o
 obj-$(CONFIG_SERIAL_DEV_BUS) += serdev.o
 
 obj-$(CONFIG_SERIAL_DEV_CTRL_TTYPORT) += serdev-ttyport.o
+obj-$(CONFIG_J700_MT7932_DEBUG_UART) += j700-mt7932-debug.o
