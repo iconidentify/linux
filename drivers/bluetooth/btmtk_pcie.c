@@ -406,6 +406,7 @@ static int btmtk_pcie_load_firmware_image(struct btmtk_pcie_dev *bdev,
 					  size_t *body_length,
 					  size_t *aligned_length)
 {
+	struct btmtk_pcie_dma_region *image = &bdev->ipc->image;
 	const struct firmware *firmware;
 	const u8 *trailer;
 	size_t body, aligned;
@@ -432,13 +433,27 @@ static int btmtk_pcie_load_firmware_image(struct btmtk_pcie_dev *bdev,
 		err = -EINVAL;
 		goto out_release;
 	}
-
-	err = btmtk_pcie_alloc_region(bdev, &bdev->ipc->image, aligned);
-	if (err)
+	if (image->vaddr) {
+		err = -EBUSY;
 		goto out_release;
-	memcpy(bdev->ipc->image.vaddr, firmware->data, body);
+	}
+
+	/*
+	 * The ROM-patch image is temporary.  Apple releases it after response 1
+	 * and boot stage 2, before publishing the persistent IPC window.  Keeping
+	 * it in btmtk_pcie_alloc_region() would leave the freed image covered by
+	 * dma_min/dma_end and expose stale DMA space to the running controller.
+	 */
+	image->vaddr = dma_alloc_coherent(&bdev->pdev->dev, aligned,
+					  &image->dma, GFP_KERNEL);
+	if (!image->vaddr) {
+		err = -ENOMEM;
+		goto out_release;
+	}
+	image->size = aligned;
+	memcpy(image->vaddr, firmware->data, body);
 	if (aligned != body)
-		memset(bdev->ipc->image.vaddr + body, 0, aligned - body);
+		memset(image->vaddr + body, 0, aligned - body);
 	memcpy(bdev->firmware_trailer, trailer, MTK_PCIE_FW_TRAILER_SIZE);
 	*body_length = body;
 	*aligned_length = aligned;
@@ -446,6 +461,21 @@ static int btmtk_pcie_load_firmware_image(struct btmtk_pcie_dev *bdev,
 out_release:
 	release_firmware(firmware);
 	return err;
+}
+
+static void btmtk_pcie_free_firmware_image(struct btmtk_pcie_dev *bdev)
+{
+	struct btmtk_pcie_dma_region *image;
+
+	if (!bdev->ipc)
+		return;
+	image = &bdev->ipc->image;
+	if (!image->vaddr)
+		return;
+
+	dma_free_coherent(&bdev->pdev->dev, image->size, image->vaddr,
+			  image->dma);
+	memset(image, 0, sizeof(*image));
 }
 
 static void btmtk_pcie_select_fwdl_window(struct btmtk_pcie_dev *bdev)
@@ -493,7 +523,8 @@ static int btmtk_pcie_activate_firmware(struct btmtk_pcie_dev *bdev)
 	err = pci_read_config_word(bdev->pdev, PCI_COMMAND, &command);
 	if (err != PCIBIOS_SUCCESSFUL || !(command & PCI_COMMAND_MASTER)) {
 		pci_clear_master(bdev->pdev);
-		return -EIO;
+		err = -EIO;
+		goto out_free_image;
 	}
 	bdev->bus_master_enabled = true;
 
@@ -541,9 +572,10 @@ static int btmtk_pcie_activate_firmware(struct btmtk_pcie_dev *bdev)
 
 	btmtk_pcie_select_fwdl_window(bdev);
 	writel(1, bdev->bar0 + MTK_PCIE_BAR0_FWDL_RELEASE);
+	btmtk_pcie_free_firmware_image(bdev);
 	bdev->firmware_active = true;
 	dev_info(&bdev->pdev->dev,
-		 "J700_MT793B_FWDL_PASS: firmware=MT7932B%u body=%zu aligned=%zu semaphore=1 doorbell=11 response=1 boot_stage=2 release=1 context_published=0 ipc_running=0 irq=0 hci=0\n",
+		 "J700_MT793B_FWDL_PASS: firmware=MT7932B%u body=%zu aligned=%zu semaphore=1 doorbell=11 response=1 boot_stage=2 release=1 image_dma_released=1 context_published=0 ipc_running=0 irq=0 hci=0\n",
 		 bdev->rom_version, body_length, aligned_length);
 
 	return 0;
@@ -551,6 +583,8 @@ static int btmtk_pcie_activate_firmware(struct btmtk_pcie_dev *bdev)
 out_clear_master:
 	pci_clear_master(bdev->pdev);
 	bdev->bus_master_enabled = false;
+out_free_image:
+	btmtk_pcie_free_firmware_image(bdev);
 	return err;
 }
 
@@ -593,6 +627,8 @@ static int btmtk_pcie_publish_context(struct btmtk_pcie_dev *bdev)
 
 	if (!ipc || !ipc->dma_window_valid)
 		return -EINVAL;
+	if (ipc->image.vaddr)
+		return -EBUSY;
 	span = ipc->dma_end - ipc->dma_min;
 	if (span > U32_MAX)
 		return -ERANGE;
@@ -887,6 +923,7 @@ static void btmtk_pcie_quiesce(struct btmtk_pcie_dev *bdev)
 		pci_clear_master(bdev->pdev);
 		bdev->bus_master_enabled = false;
 	}
+	btmtk_pcie_free_firmware_image(bdev);
 }
 
 static int btmtk_pcie_start_ipc(struct btmtk_pcie_dev *bdev)
@@ -1615,6 +1652,11 @@ static void btmtk_pcie_remove(struct pci_dev *pdev)
 	}
 }
 
+static void btmtk_pcie_shutdown(struct pci_dev *pdev)
+{
+	btmtk_pcie_remove(pdev);
+}
+
 static const struct pci_device_id btmtk_pcie_table[] = {
 	{ PCI_DEVICE(MTK_PCIE_VENDOR_ID, MTK_PCIE_DEVICE_MT7922_BT),
 	  .driver_data = 0x7922 },
@@ -1631,6 +1673,7 @@ static struct pci_driver btmtk_pcie_driver = {
 	.id_table = btmtk_pcie_table,
 	.probe = btmtk_pcie_probe,
 	.remove = btmtk_pcie_remove,
+	.shutdown = btmtk_pcie_shutdown,
 };
 module_pci_driver(btmtk_pcie_driver);
 
