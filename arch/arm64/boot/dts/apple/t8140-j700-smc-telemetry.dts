@@ -4,4 +4,19 @@
 
 &smc {
 	apple,j700-telemetry-only;
+
+	/* Live readable, non-function sensor metadata from this J700 firmware.
+	 * Keep key labels until physical sensor locations are independently mapped.
+	 */
+	hwmon {
+		compatible = "apple,smc-hwmon";
+		temperature-TB0T { apple,key-id = "TB0T"; label = "SMC TB0T"; };
+		temperature-TCMb { apple,key-id = "TCMb"; label = "SMC TCMb"; };
+		temperature-TCMz { apple,key-id = "TCMz"; label = "SMC TCMz"; };
+		temperature-TG0A { apple,key-id = "TG0A"; label = "SMC TG0A"; };
+		temperature-Te04 { apple,key-id = "Te04"; label = "SMC Te04"; };
+		temperature-Te05 { apple,key-id = "Te05"; label = "SMC Te05"; };
+		temperature-Te06 { apple,key-id = "Te06"; label = "SMC Te06"; };
+		temperature-Te0R { apple,key-id = "Te0R"; label = "SMC Te0R"; };
+	};
 };
