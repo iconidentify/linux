@@ -433,6 +433,37 @@ static int apple_smc_j700_log_function_key(struct apple_smc *smc,
 	return 0;
 }
 
+/* Existing macsmc-power read keys, excluding identity and charge controls. */
+static int apple_smc_j700_log_power(struct apple_smc *smc)
+{
+	static const char * const keys[] = {
+		"B0AV", "B0AC", "B0AP", "BUIC", "B0AT", "B0CT", "ACPW",
+	};
+	struct apple_smc_key_info info;
+	u8 value[8];
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(keys); i++) {
+		ret = apple_smc_get_key_info(smc, _SMC_KEY(keys[i]), &info);
+		if (ret < 0)
+			return ret;
+		if (!(info.flags & APPLE_SMC_READABLE) ||
+		    (info.flags & APPLE_SMC_FUNCTION) ||
+		    !info.size || info.size > sizeof(value))
+			return -EINVAL;
+
+		ret = apple_smc_read(smc, _SMC_KEY(keys[i]), value, info.size);
+		if (ret < 0)
+			return ret;
+		if (ret != info.size)
+			return -EIO;
+		dev_info(smc->dev,
+			 "J700_SMC_POWER_KEY: key=%s type=%08x size=%u raw=%*ph\n",
+			 keys[i], info.type_code, info.size, info.size, value);
+	}
+	return 0;
+}
+
 static int apple_smc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -523,6 +554,10 @@ static int apple_smc_probe(struct platform_device *pdev)
 			return ret;
 
 		if (j700_read_only) {
+			ret = apple_smc_j700_log_power(smc);
+			if (ret)
+				return dev_err_probe(dev, ret,
+						     "J700 SMC power-key probe failed\n");
 			dev_info(smc->dev,
 				 "J700_SMC_READ_ONLY_READY: keys=%u key_writes=0 notifications=0 children=0\n",
 				 smc->key_count);

@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* Qualification DT: SMC only; use before the cpufreq trial. */
+#include "t8140-j700.dts"
+
+/* Later cycle-65 geometry in t8140.dtsi supersedes the initial ADT draft. */
+&smc_mbox {
+	status = "okay";
+};
+
+&smc {
+	status = "okay";
+};

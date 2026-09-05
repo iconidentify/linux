@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* First SMC power trial: metadata and existing battery/AC read keys only. */
+#include "t8140-j700-smc.dts"
+
+&smc {
+	apple,j700-read-only-diagnostics;
+};
