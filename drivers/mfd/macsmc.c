@@ -10,6 +10,7 @@
 #include <linux/device.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
+#include <linux/jiffies.h>
 #include <linux/math.h>
 #include <linux/mfd/core.h>
 #include <linux/mfd/macsmc.h>
@@ -433,6 +434,40 @@ static int apple_smc_j700_log_function_key(struct apple_smc *smc,
 	return 0;
 }
 
+/* Discover battery/temperature key metadata only, never execute key reads. */
+static int apple_smc_j700_log_sensor_inventory(struct apple_smc *smc)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(5000);
+	struct apple_smc_key_info info;
+	smc_key key;
+	unsigned int i, logged = 0;
+	int ret;
+
+	if (smc->key_count > 4096)
+		return -E2BIG;
+	dev_info(smc->dev, "J700_SMC_INVENTORY_BEGIN: keys=%u values_read=0\n",
+		 smc->key_count);
+	for (i = 0; i < smc->key_count && logged < 128; i++) {
+		if (time_after(jiffies, deadline))
+			return -ETIMEDOUT;
+		ret = apple_smc_get_key_by_index(smc, i, &key);
+		if (ret < 0)
+			return ret;
+		if ((key >> 24) != 'B' && (key >> 24) != 'T')
+			continue;
+		ret = apple_smc_get_key_info(smc, key, &info);
+		if (ret < 0)
+			return ret;
+		dev_info(smc->dev,
+			 "J700_SMC_SENSOR_METADATA: key=%08x type=%08x size=%u flags=%02x\n",
+			 key, info.type_code, info.size, info.flags);
+		logged++;
+	}
+	dev_info(smc->dev, "J700_SMC_INVENTORY_END: scanned=%u logged=%u values_read=0\n",
+		 i, logged);
+	return 0;
+}
+
 /* Existing macsmc-power read keys, excluding identity and charge controls. */
 static int apple_smc_j700_log_power(struct apple_smc *smc)
 {
@@ -560,6 +595,9 @@ static int apple_smc_probe(struct platform_device *pdev)
 			return ret;
 
 		if (j700_read_only) {
+			ret = apple_smc_j700_log_sensor_inventory(smc);
+			if (ret)
+				dev_warn(dev, "J700 SMC metadata inventory incomplete: %d\n", ret);
 			ret = apple_smc_j700_log_power(smc);
 			if (ret)
 				return dev_err_probe(dev, ret,
