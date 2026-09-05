@@ -441,16 +441,22 @@ static int apple_smc_j700_log_power(struct apple_smc *smc)
 	};
 	struct apple_smc_key_info info;
 	u8 value[8];
-	int i, ret;
+	int i, ret, rejected = 0;
 
 	for (i = 0; i < ARRAY_SIZE(keys); i++) {
 		ret = apple_smc_get_key_info(smc, _SMC_KEY(keys[i]), &info);
 		if (ret < 0)
 			return ret;
+		dev_info(smc->dev,
+			 "J700_SMC_POWER_METADATA: key=%s type=%08x size=%u flags=%02x\n",
+			 keys[i], info.type_code, info.size, info.flags);
 		if (!(info.flags & APPLE_SMC_READABLE) ||
 		    (info.flags & APPLE_SMC_FUNCTION) ||
-		    !info.size || info.size > sizeof(value))
-			return -EINVAL;
+		    !info.size || info.size > sizeof(value)) {
+			dev_warn(smc->dev, "J700_SMC_POWER_SKIPPED: key=%s\n", keys[i]);
+			rejected = -EINVAL;
+			continue;
+		}
 
 		ret = apple_smc_read(smc, _SMC_KEY(keys[i]), value, info.size);
 		if (ret < 0)
@@ -461,7 +467,7 @@ static int apple_smc_j700_log_power(struct apple_smc *smc)
 			 "J700_SMC_POWER_KEY: key=%s type=%08x size=%u raw=%*ph\n",
 			 keys[i], info.type_code, info.size, info.size, value);
 	}
-	return 0;
+	return rejected;
 }
 
 static int apple_smc_probe(struct platform_device *pdev)
