@@ -15,6 +15,7 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/macsmc.h>
 #include <linux/notifier.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/overflow.h>
@@ -123,6 +124,12 @@ static int apple_smc_cmd(struct apple_smc *smc, u64 cmd, u64 arg,
 	return apple_smc_cmd_locked(smc, cmd, arg, size, wsize, ret_data);
 }
 
+/* J700 wake qualification: all charger/power-setting writes stay blocked. */
+static bool j700_input_events;
+module_param(j700_input_events, bool, 0400);
+MODULE_PARM_DESC(j700_input_events,
+	"Enable only NTAP notifications and input events in J700 telemetry mode");
+
 static int apple_smc_rw_locked(struct apple_smc *smc, smc_key key,
 				const void *wbuf, size_t wsize,
 				void *rbuf, size_t rsize)
@@ -134,7 +141,9 @@ static int apple_smc_rw_locked(struct apple_smc *smc, smc_key key,
 
 	lockdep_assert_held(&smc->mutex);
 
-	if (smc->read_only && wsize)
+	if (smc->read_only && wsize &&
+	    !(smc->notifications_only && key == SMC_KEY(NTAP) &&
+	      wbuf && wsize == 1 && !rsize && *(const u8 *)wbuf <= 1))
 		return -EPERM;
 
 	if (rsize > SMC_MAX_SIZE)
@@ -536,6 +545,8 @@ static int apple_smc_probe(struct platform_device *pdev)
 	bool j700_gpio_only;
 	bool j700_read_only;
 	bool j700_telemetry;
+	struct apple_smc_key_info notify_info;
+	static const struct mfd_cell input_dev = MFD_CELL_NAME("macsmc-input");
 	__be32 count;
 	int ret;
 
@@ -551,6 +562,9 @@ static int apple_smc_probe(struct platform_device *pdev)
 	if (j700_telemetry && !(of_machine_is_compatible("apple,j700") &&
 				of_machine_is_compatible("apple,t8140")))
 		return -ENODEV;
+	if (j700_input_events && !j700_telemetry)
+		return dev_err_probe(dev, -EINVAL,
+				     "J700 input events require telemetry mode\n");
 
 	smc = devm_kzalloc(dev, sizeof(*smc), GFP_KERNEL);
 	if (!smc)
@@ -559,6 +573,7 @@ static int apple_smc_probe(struct platform_device *pdev)
 	mutex_init(&smc->mutex);
 	smc->dev = &pdev->dev;
 	smc->read_only = j700_read_only || j700_telemetry;
+	smc->notifications_only = j700_input_events;
 	smc->sram_base = devm_platform_get_and_ioremap_resource(pdev, 1, &smc->sram);
 	if (IS_ERR(smc->sram_base))
 		return dev_err_probe(dev, PTR_ERR(smc->sram_base), "Failed to map SRAM region");
@@ -669,6 +684,29 @@ static int apple_smc_probe(struct platform_device *pdev)
 					   NULL, 0, NULL);
 		if (ret)
 			return ret;
+		if (j700_input_events) {
+			ret = apple_smc_get_key_info(smc, SMC_KEY(NTAP), &notify_info);
+			if (ret < 0)
+				return dev_err_probe(dev, ret, "NTAP metadata unavailable\n");
+			dev_info(dev, "J700_SMC_NTAP_INFO: size=%u flags=%02x type=%08x\n",
+				 notify_info.size, notify_info.flags, notify_info.type_code);
+			if (notify_info.size != 1 ||
+			    !(notify_info.flags & APPLE_SMC_WRITABLE))
+				return dev_err_probe(dev, -EINVAL, "Expected writable NTAP flag\n");
+			/* Install cleanup before subscribing, including an ambiguous failure. */
+			ret = devm_add_action_or_reset(dev, apple_smc_disable_notifications, smc);
+			if (ret)
+				return ret;
+			ret = devm_mfd_add_devices(dev, PLATFORM_DEVID_NONE, &input_dev, 1,
+						   NULL, 0, NULL);
+			if (ret)
+				return ret;
+			ret = apple_smc_write_flag(smc, SMC_KEY(NTAP), true);
+			if (ret < 0)
+				return dev_err_probe(dev, ret, "Failed to enable NTAP events\n");
+			dev_info(dev, "J700_SMC_INPUT_EVENTS_READY: NTAP=1 other_key_writes=blocked children=power,hwmon,input\n");
+			return 0;
+		}
 		dev_info(dev, "J700_SMC_TELEMETRY_READY: key_writes=blocked notifications=unchanged children=power,hwmon\n");
 		return 0;
 	}

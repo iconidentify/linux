@@ -96,7 +96,8 @@ enum apple_smc_boot_stage {
  * @msg_id: Current message id for commands, will be incremented for each command
  * @atomic_mode: Flag set when atomic mode is entered
  * @atomic_pending: Flag indicating pending atomic command
- * @read_only: Reject all key write and read/write commands
+ * @read_only: Reject key writes, subject only to the notification flag opt-in
+ * @notifications_only: Permit only one-byte NTAP 0/1 writes in read-only mode
  * @cmd_done: Completion for command execution in non-atomic mode
  * @cmd_ret: Return value from SMC for last command
  * @mutex: Mutex for non-atomic mode
@@ -125,6 +126,7 @@ struct apple_smc {
 	bool atomic_mode;
 	bool atomic_pending;
 	bool read_only;
+	bool notifications_only;
 	struct completion cmd_done;
 	u64 cmd_ret;
 
