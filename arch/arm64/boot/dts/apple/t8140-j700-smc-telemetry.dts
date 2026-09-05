@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* Battery/thermal telemetry without charge-policy or notification writes. */
+#include "t8140-j700-smc.dts"
+
+&smc {
+	apple,j700-telemetry-only;
+};

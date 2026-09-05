@@ -60,6 +60,11 @@ static const struct mfd_cell apple_smc_gpio_devs[] = {
 	MFD_CELL_OF("macsmc-gpio", NULL, NULL, 0, 0, "apple,smc-gpio"),
 };
 
+static const struct mfd_cell apple_smc_telemetry_devs[] = {
+	MFD_CELL_NAME("macsmc-power"),
+	MFD_CELL_OF("macsmc-hwmon", NULL, NULL, 0, 0, "apple,smc-hwmon"),
+};
+
 static int apple_smc_cmd_locked(struct apple_smc *smc, u64 cmd, u64 arg,
 				  u64 size, u64 wsize, u32 *ret_data)
 {
@@ -128,6 +133,9 @@ static int apple_smc_rw_locked(struct apple_smc *smc, smc_key key,
 	u64 cmd;
 
 	lockdep_assert_held(&smc->mutex);
+
+	if (smc->read_only && wsize)
+		return -EPERM;
 
 	if (rsize > SMC_MAX_SIZE)
 		return -EINVAL;
@@ -232,6 +240,9 @@ int apple_smc_enter_atomic(struct apple_smc *smc)
 {
 	guard(mutex)(&smc->mutex);
 
+	if (smc->read_only)
+		return -EPERM;
+
 	/*
 	 * Disable notifications since this is called before shutdown and no
 	 * notification handler will be able to handle the notification
@@ -256,6 +267,9 @@ int apple_smc_write_atomic(struct apple_smc *smc, smc_key key, const void *buf, 
 	u8 result;
 	int ret;
 	u64 msg;
+
+	if (smc->read_only)
+		return -EPERM;
 
 	if (size > SMC_MAX_SIZE || size == 0)
 		return -EINVAL;
@@ -440,7 +454,7 @@ static int apple_smc_j700_log_sensor_inventory(struct apple_smc *smc)
 	unsigned long deadline = jiffies + msecs_to_jiffies(5000);
 	struct apple_smc_key_info info;
 	smc_key key;
-	unsigned int i, logged = 0;
+	unsigned int i, logged = 0, battery = 0, thermal = 0;
 	int ret;
 
 	if (smc->key_count > 4096)
@@ -455,6 +469,16 @@ static int apple_smc_j700_log_sensor_inventory(struct apple_smc *smc)
 			return ret;
 		if ((key >> 24) != 'B' && (key >> 24) != 'T')
 			continue;
+		/* A large B-key namespace must not starve temperature discovery. */
+		if ((key >> 24) == 'B') {
+			if (battery == 64)
+				continue;
+			battery++;
+		} else {
+			if (thermal == 64)
+				continue;
+			thermal++;
+		}
 		ret = apple_smc_get_key_info(smc, key, &info);
 		if (ret < 0)
 			return ret;
@@ -511,6 +535,7 @@ static int apple_smc_probe(struct platform_device *pdev)
 	struct apple_smc *smc;
 	bool j700_gpio_only;
 	bool j700_read_only;
+	bool j700_telemetry;
 	__be32 count;
 	int ret;
 
@@ -518,9 +543,14 @@ static int apple_smc_probe(struct platform_device *pdev)
 					       "apple,j700-read-only-diagnostics");
 	j700_gpio_only = of_property_read_bool(dev->of_node,
 					      "apple,j700-gpio-only");
-	if (j700_read_only && j700_gpio_only)
+	j700_telemetry = of_property_read_bool(dev->of_node,
+					     "apple,j700-telemetry-only");
+	if ((int)j700_read_only + j700_gpio_only + j700_telemetry > 1)
 		return dev_err_probe(dev, -EINVAL,
 				     "J700 SMC diagnostic modes are mutually exclusive\n");
+	if (j700_telemetry && !(of_machine_is_compatible("apple,j700") &&
+				of_machine_is_compatible("apple,t8140")))
+		return -ENODEV;
 
 	smc = devm_kzalloc(dev, sizeof(*smc), GFP_KERNEL);
 	if (!smc)
@@ -528,6 +558,7 @@ static int apple_smc_probe(struct platform_device *pdev)
 
 	mutex_init(&smc->mutex);
 	smc->dev = &pdev->dev;
+	smc->read_only = j700_read_only || j700_telemetry;
 	smc->sram_base = devm_platform_get_and_ioremap_resource(pdev, 1, &smc->sram);
 	if (IS_ERR(smc->sram_base))
 		return dev_err_probe(dev, PTR_ERR(smc->sram_base), "Failed to map SRAM region");
@@ -625,6 +656,20 @@ static int apple_smc_probe(struct platform_device *pdev)
 		dev_info(smc->dev,
 			 "J700_SMC_GPIO_ONLY_READY: keys=%u notifications=0 children=macsmc-gpio\n",
 			 smc->key_count);
+		return 0;
+	}
+
+	if (j700_telemetry) {
+		ret = apple_smc_j700_log_sensor_inventory(smc);
+		if (ret)
+			dev_warn(dev, "J700 sensor inventory incomplete: %d\n", ret);
+		ret = devm_mfd_add_devices(smc->dev, PLATFORM_DEVID_NONE,
+					   apple_smc_telemetry_devs,
+					   ARRAY_SIZE(apple_smc_telemetry_devs),
+					   NULL, 0, NULL);
+		if (ret)
+			return ret;
+		dev_info(dev, "J700_SMC_TELEMETRY_READY: key_writes=blocked notifications=unchanged children=power,hwmon\n");
 		return 0;
 	}
 

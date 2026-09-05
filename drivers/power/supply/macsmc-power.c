@@ -101,7 +101,21 @@ struct macsmc_power {
 	bool orderly_shutdown_triggered;
 
 	struct delayed_work dbg_log_work;
+	struct delayed_work telemetry_work;
 };
+
+/* Refresh userspace without changing the firmware notification setting. */
+static void macsmc_telemetry_work(struct work_struct *work)
+{
+	struct macsmc_power *power = container_of(to_delayed_work(work),
+						struct macsmc_power, telemetry_work);
+
+	if (power->batt)
+		power_supply_changed(power->batt);
+	if (power->ac)
+		power_supply_changed(power->ac);
+	schedule_delayed_work(&power->telemetry_work, 30 * HZ);
+}
 
 static int macsmc_log_power_set(const char *val, const struct kernel_param *kp);
 
@@ -603,6 +617,9 @@ static int macsmc_battery_set_property(struct power_supply *psy,
 {
 	struct macsmc_power *power = power_supply_get_drvdata(psy);
 
+	if (power->smc->read_only)
+		return -EPERM;
+
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
 		return macsmc_battery_set_charge_behaviour(power, val->intval);
@@ -637,6 +654,9 @@ static int macsmc_battery_property_is_writeable(struct power_supply *psy,
 						enum power_supply_property psp)
 {
 	struct macsmc_power *power = power_supply_get_drvdata(psy);
+
+	if (power->smc->read_only)
+		return false;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
@@ -925,17 +945,17 @@ static int macsmc_power_probe(struct platform_device *pdev)
 			return -EIO;
 		}
 
-		/* Reset "Optimised Battery Charging" flags to default state */
-		if (power->has_chte)
-			apple_smc_write_u32(smc, SMC_KEY(CHTE), 0);
-		else if (power->has_ch0c)
-			apple_smc_write_u8(smc, SMC_KEY(CH0C), 0);
-
-		if (power->has_ch0i)
-			apple_smc_write_u8(smc, SMC_KEY(CH0I), 0);
-
-		apple_smc_write_u8(smc, SMC_KEY(CH0K), 0);
-		apple_smc_write_u8(smc, SMC_KEY(CH0B), 0);
+		/* A telemetry-only parent preserves firmware charging policy. */
+		if (!smc->read_only) {
+			if (power->has_chte)
+				apple_smc_write_u32(smc, SMC_KEY(CHTE), 0);
+			else if (power->has_ch0c)
+				apple_smc_write_u8(smc, SMC_KEY(CH0C), 0);
+			if (power->has_ch0i)
+				apple_smc_write_u8(smc, SMC_KEY(CH0I), 0);
+			apple_smc_write_u8(smc, SMC_KEY(CH0K), 0);
+			apple_smc_write_u8(smc, SMC_KEY(CH0B), 0);
+		}
 
 		/* Configure charge behaviour if supported */
 		if (power->has_ch0i || power->has_ch0c || power->has_chte) {
@@ -1037,10 +1057,14 @@ static int macsmc_power_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	power->nb.notifier_call = macsmc_power_event;
-	blocking_notifier_chain_register(&smc->event_handlers, &power->nb);
+	if (!smc->read_only)
+		blocking_notifier_chain_register(&smc->event_handlers, &power->nb);
 
 	INIT_WORK(&power->critical_work, macsmc_power_critical_work);
 	INIT_DELAYED_WORK(&power->dbg_log_work, macsmc_dbg_work);
+	INIT_DELAYED_WORK(&power->telemetry_work, macsmc_telemetry_work);
+	if (smc->read_only)
+		schedule_delayed_work(&power->telemetry_work, 30 * HZ);
 
 	g_power = power;
 
@@ -1055,11 +1079,13 @@ static void macsmc_power_remove(struct platform_device *pdev)
 	struct macsmc_power *power = dev_get_drvdata(&pdev->dev);
 
 	cancel_work(&power->critical_work);
+	cancel_delayed_work_sync(&power->telemetry_work);
 	cancel_delayed_work(&power->dbg_log_work);
 
 	g_power = NULL;
 
-	blocking_notifier_chain_unregister(&power->smc->event_handlers, &power->nb);
+	if (!power->smc->read_only)
+		blocking_notifier_chain_unregister(&power->smc->event_handlers, &power->nb);
 }
 
 static const struct platform_device_id macsmc_power_id[] = {
