@@ -2,7 +2,7 @@
 /* Qualification DT: SMC only; use before the cpufreq trial. */
 #include "t8140-j700.dts"
 
-/* Later cycle-65 geometry in t8140.dtsi supersedes the initial ADT draft. */
+/* SRAM geometry follows the live iop-smc-nub region-base/region-size. */
 &smc_mbox {
 	status = "okay";
 };

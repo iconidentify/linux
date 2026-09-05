@@ -384,7 +384,7 @@
 			compatible = "apple,t8140-smc", "apple,t8103-smc",
 				     "apple,smc";
 			reg = <0x3 0x0c600000 0x0 0x4000>,
-			      <0x3 0x0e000000 0x0 0x100000>;
+			      <0x3 0x0de00000 0x0 0x100000>;
 			reg-names = "smc", "sram";
 			mboxes = <&smc_mbox>;
 			status = "disabled";
