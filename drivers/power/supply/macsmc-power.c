@@ -104,7 +104,9 @@ struct macsmc_power {
 	struct delayed_work telemetry_work;
 };
 
-/* Refresh userspace without changing the firmware notification setting. */
+/* Refresh userspace without changing firmware notification settings.
+ * Freeze polling before device suspend so it cannot read a suspended SMC.
+ */
 static void macsmc_telemetry_work(struct work_struct *work)
 {
 	struct macsmc_power *power = container_of(to_delayed_work(work),
@@ -114,7 +116,7 @@ static void macsmc_telemetry_work(struct work_struct *work)
 		power_supply_changed(power->batt);
 	if (power->ac)
 		power_supply_changed(power->ac);
-	schedule_delayed_work(&power->telemetry_work, 30 * HZ);
+	queue_delayed_work(system_freezable_wq, &power->telemetry_work, 30 * HZ);
 }
 
 static int macsmc_log_power_set(const char *val, const struct kernel_param *kp);
@@ -1099,7 +1101,7 @@ static int macsmc_power_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&power->dbg_log_work, macsmc_dbg_work);
 	INIT_DELAYED_WORK(&power->telemetry_work, macsmc_telemetry_work);
 	if (smc->read_only)
-		schedule_delayed_work(&power->telemetry_work, 30 * HZ);
+		queue_delayed_work(system_freezable_wq, &power->telemetry_work, 30 * HZ);
 
 	g_power = power;
 
