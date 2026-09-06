@@ -807,6 +807,58 @@ static int macsmc_power_event(struct notifier_block *nb, unsigned long event, vo
 	return NOTIFY_DONE;
 }
 
+/*
+ * Optional gauge keys differ between firmware generations. Do not advertise
+ * an unreadable field: an EIO from one field aborts the entire supply uevent.
+ */
+static int macsmc_battery_optional_properties(struct macsmc_power *power,
+					     enum power_supply_property *props,
+					     int nprops)
+{
+	static const struct {
+		enum power_supply_property property;
+		smc_key key;
+		u8 size;
+	} optional[] = {
+#define BATT_OPTIONAL(prop, key, size) { POWER_SUPPLY_PROP_##prop, SMC_KEY(key), size }
+		BATT_OPTIONAL(TIME_TO_EMPTY_NOW, B0TE, 2),
+		BATT_OPTIONAL(TIME_TO_FULL_NOW, B0TF, 2),
+		BATT_OPTIONAL(VOLTAGE_MIN_DESIGN, BITV, 2),
+		BATT_OPTIONAL(VOLTAGE_MAX_DESIGN, BVVN, 2),
+		BATT_OPTIONAL(VOLTAGE_MIN, BLPM, 2),
+		BATT_OPTIONAL(VOLTAGE_MAX, BLPX, 2),
+		BATT_OPTIONAL(CHARGE_TERM_CURRENT, B0RC, 2),
+		BATT_OPTIONAL(CONSTANT_CHARGE_CURRENT_MAX, B0RI, 2),
+		BATT_OPTIONAL(CONSTANT_CHARGE_VOLTAGE, B0RV, 2),
+		BATT_OPTIONAL(CHARGE_FULL_DESIGN, B0DC, 2),
+		BATT_OPTIONAL(CHARGE_FULL, B0FC, 2),
+		BATT_OPTIONAL(CHARGE_NOW, B0RM, 2),
+		BATT_OPTIONAL(ENERGY_FULL_DESIGN, B0DC, 2),
+		BATT_OPTIONAL(ENERGY_FULL, B0FC, 2),
+		BATT_OPTIONAL(ENERGY_NOW, B0RM, 2),
+		BATT_OPTIONAL(CHARGE_COUNTER, BAAC, 8),
+#undef BATT_OPTIONAL
+	};
+	struct apple_smc_key_info info;
+	u8 value[8];
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(optional); i++) {
+		ret = apple_smc_get_key_info(power->smc, optional[i].key, &info);
+		if (ret || info.size != optional[i].size ||
+		    !(info.flags & APPLE_SMC_READABLE))
+			continue;
+		ret = apple_smc_read(power->smc, optional[i].key, value, info.size);
+		if (ret != info.size) {
+			dev_dbg(power->dev, "Skipping unreadable optional battery key %08x (%d)\n",
+				 optional[i].key, ret);
+			continue;
+		}
+		props[nprops++] = optional[i].property;
+	}
+	return nprops;
+}
+
 static int macsmc_power_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -885,23 +937,7 @@ static int macsmc_power_probe(struct platform_device *pdev)
 		props[nprops++] = POWER_SUPPLY_PROP_MANUFACTURE_MONTH;
 		props[nprops++] = POWER_SUPPLY_PROP_MANUFACTURE_DAY;
 
-		/* Extended properties usually present */
-		props[nprops++] = POWER_SUPPLY_PROP_TIME_TO_EMPTY_NOW;
-		props[nprops++] = POWER_SUPPLY_PROP_TIME_TO_FULL_NOW;
-		props[nprops++] = POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN;
-		props[nprops++] = POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN;
-		props[nprops++] = POWER_SUPPLY_PROP_VOLTAGE_MIN;
-		props[nprops++] = POWER_SUPPLY_PROP_VOLTAGE_MAX;
-		props[nprops++] = POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT;
-		props[nprops++] = POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX;
-		props[nprops++] = POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE;
-		props[nprops++] = POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN;
-		props[nprops++] = POWER_SUPPLY_PROP_CHARGE_FULL;
-		props[nprops++] = POWER_SUPPLY_PROP_CHARGE_NOW;
-		props[nprops++] = POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN;
-		props[nprops++] = POWER_SUPPLY_PROP_ENERGY_FULL;
-		props[nprops++] = POWER_SUPPLY_PROP_ENERGY_NOW;
-		props[nprops++] = POWER_SUPPLY_PROP_CHARGE_COUNTER;
+		nprops = macsmc_battery_optional_properties(power, props, nprops);
 
 		/* Detect features based on key availability */
 		if (apple_smc_key_exists(smc, SMC_KEY(CHTE)))
