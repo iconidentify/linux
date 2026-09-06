@@ -15,7 +15,9 @@
 #include <linux/hid.h>
 #include <linux/input/mt.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/slab.h>
+#include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
 #include "hid-ids.h"
@@ -63,6 +65,9 @@ MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state fie
 #define SPI_REPORT_ID      0x02
 #define SPI_RESET_REPORT_ID 0x60
 #define MTP_REPORT_ID      0x75
+/* Fixed J700 report overhead, including the report ID. */
+#define J700_MTP_HDR_SZ    40
+#define J700_MTP_POSITION_OFFSET 36
 #define SENSOR_DIMENSIONS_REPORT_ID 0xd9
 #define USB_BATTERY_TIMEOUT_SEC 60
 
@@ -143,6 +148,7 @@ struct magicmouse_input_ops {
  * @input: Input device through which we report events.
  * @quirks: Currently unused.
  * @query_dimensions: Whether to query and update dimensions on first open
+ * @j700_mtp: Use the J700 report layout and only its decoded input axes.
  * @ntouches: Number of touches in most recent touch report.
  * @scroll_accel: Number of consecutive scroll motions.
  * @scroll_jiffies: Time of last scroll motion.
@@ -158,6 +164,7 @@ struct magicmouse_sc {
 	struct input_dev *input;
 	unsigned long quirks;
 	bool query_dimensions;
+	bool j700_mtp;
 
 	int ntouches;
 	int scroll_accel;
@@ -771,16 +778,14 @@ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
 	struct tp_finger *f;
 	int i, n;
 	u32 npoints;
-	const size_t hdr_sz = sizeof(struct tp_header);
+	const size_t hdr_sz = msc->j700_mtp ? J700_MTP_HDR_SZ : sizeof(struct tp_header);
 	const size_t touch_sz = sizeof(struct tp_finger);
 	u8 map_contacs[MAX_CONTACTS];
 
-	// hid_warn(hdev, "%s\n", __func__);
-	// print_hex_dump_debug("appleft ev: ", DUMP_PREFIX_OFFSET, 16, 1, data,
-	// 		     size, false);
-
-	/* Expect 46 bytes of prefix, and N * 30 bytes of touch data. */
-	if (size < hdr_sz || ((size - hdr_sz) % touch_sz) != 0)
+	/* Both layouts use a 30-byte stride, with different fixed overhead. */
+	if (size < 0 || size < hdr_sz || ((size - hdr_sz) % touch_sz) != 0)
+		return 0;
+	if (msc->j700_mtp && data[0] != MTP_REPORT_ID)
 		return 0;
 
 	tp_hdr = (struct tp_header *)data;
@@ -796,14 +801,24 @@ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
 
 	n = 0;
 	for (i = 0; i < tp_hdr->num_fingers; i++) {
-		f = (struct tp_finger *)(data + hdr_sz + i * touch_sz);
-		if (le16_to_int(f->touch_major) == 0)
-			continue;
+		if (msc->j700_mtp) {
+			const u8 *pos = data + J700_MTP_POSITION_OFFSET + i * touch_sz;
 
-		hid_dbg(hdev, "ev x:%04x y:%04x\n", le16_to_int(f->abs_x),
-			le16_to_int(f->abs_y));
-		msc->pos[n].x = le16_to_int(f->abs_x);
-		msc->pos[n].y = -le16_to_int(f->abs_y);
+			/*
+			 * Bytes 36..39 hold signed absolute X/Y; bytes 40..43 do not.
+			 * Contact presence comes from the header; size and pressure
+			 * fields have not been decoded for this layout.
+			 */
+			msc->pos[n].x = (s16)get_unaligned_le16(pos);
+			msc->pos[n].y = -(s16)get_unaligned_le16(pos + 2);
+		} else {
+			f = (struct tp_finger *)(data + hdr_sz + i * touch_sz);
+			if (le16_to_int(f->touch_major) == 0)
+				continue;
+
+			msc->pos[n].x = le16_to_int(f->abs_x);
+			msc->pos[n].y = -le16_to_int(f->abs_y);
+		}
 		map_contacs[n] = i;
 		n++;
 	}
@@ -812,8 +827,16 @@ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
 
 	for (i = 0; i < n; i++) {
 		int idx = map_contacs[i];
-		f = (struct tp_finger *)(data + hdr_sz + idx * touch_sz);
-		report_finger_data(input, msc->tracking_ids[i], &msc->pos[i], f);
+
+		if (msc->j700_mtp) {
+			input_mt_slot(input, msc->tracking_ids[i]);
+			input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
+			input_report_abs(input, ABS_MT_POSITION_X, msc->pos[i].x);
+			input_report_abs(input, ABS_MT_POSITION_Y, msc->pos[i].y);
+		} else {
+			f = (struct tp_finger *)(data + hdr_sz + idx * touch_sz);
+			report_finger_data(input, msc->tracking_ids[i], &msc->pos[i], f);
+		}
 	}
 
 	input_mt_sync_frame(input);
@@ -1055,6 +1078,9 @@ static int magicmouse_setup_input_mtp(struct input_dev *input,
 	int mt_flags = 0;
 	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
 
+	msc->j700_mtp = hdev->bus == BUS_HOST &&
+		       of_machine_is_compatible("apple,j700");
+
 	__set_bit(INPUT_PROP_BUTTONPAD, input->propbit);
 	__clear_bit(BTN_0, input->keybit);
 	__clear_bit(BTN_RIGHT, input->keybit);
@@ -1114,6 +1140,18 @@ static int magicmouse_setup_input_mtp(struct input_dev *input,
 	 * not actually want it.
 	 */
 	__clear_bit(EV_REP, input->evbit);
+
+	if (msc->j700_mtp) {
+		/* Advertise only the fields decoded from J700 reports. */
+		__clear_bit(ABS_MT_PRESSURE, input->absbit);
+		__clear_bit(ABS_PRESSURE, input->absbit);
+		__clear_bit(ABS_MT_TOUCH_MAJOR, input->absbit);
+		__clear_bit(ABS_MT_TOUCH_MINOR, input->absbit);
+		__clear_bit(ABS_MT_WIDTH_MAJOR, input->absbit);
+		__clear_bit(ABS_MT_WIDTH_MINOR, input->absbit);
+		__clear_bit(ABS_MT_ORIENTATION, input->absbit);
+		__clear_bit(ABS_TOOL_WIDTH, input->absbit);
+	}
 
 	error = input_mt_init_slots(input, MAX_CONTACTS, mt_flags);
 	if (error)
